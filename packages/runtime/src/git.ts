@@ -68,10 +68,11 @@ export async function inspectRepository(root: string, remote: string): Promise<R
 export async function changedPaths(root: string, baseSha?: string): Promise<string[]> {
   if (baseSha) GitShaSchema.parse(baseSha)
   const tracked = await gitCommand(root, ['diff', '--name-only', '--no-renames', '-z', baseSha ?? 'HEAD', '--'])
-  const committed = baseSha ? await gitCommand(root, ['log', '--format=', '--name-only', '--no-renames', '-z', `${baseSha}..HEAD`, '--']) : ''
+  const staged = await gitCommand(root, ['diff', '--cached', '--name-only', '--no-renames', '-z', baseSha ?? 'HEAD', '--'])
+  const committed = baseSha ? await gitCommand(root, ['log', '-m', '--format=', '--name-only', '--no-renames', '-z', `${baseSha}..HEAD`, '--']) : ''
   // Include ignored files too: checks cannot quietly create artifacts outside approved scope.
   const others = await gitCommand(root, ['ls-files', '--others', '-z'])
-  return [...new Set((tracked + committed + others).split('\0').filter(Boolean))].sort()
+  return [...new Set((tracked + staged + committed + others).split('\0').filter(Boolean))].sort()
 }
 export async function verifyRepository(expected: RepositoryIdentity, options: { expectedSha?: string; clean?: boolean; allowWriter?: boolean } = {}): Promise<RepositoryIdentity> {
   expected = RepositorySchema.parse(expected)

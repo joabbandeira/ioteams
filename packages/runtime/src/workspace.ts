@@ -72,12 +72,21 @@ export async function createWorkspace(policy: ApprovedPolicy): Promise<Workspace
     await sourceLease.assertOwned()
     await verifyInstructions(policy)
     targetLease = await acquireWriter(repository, stateDirectory)
-    return Object.freeze({ repository, assertOwned: targetLease.assertOwned, release: targetLease.release })
+    const checkoutLease = targetLease
+    return Object.freeze({ repository,
+      async assertOwned() { await sourceLease.assertOwned(); await checkoutLease.assertOwned() },
+      async release() {
+        // Never free the original while the checkout reservation is still uncertain.
+        await checkoutLease.release()
+        await sourceLease.release()
+      },
+    })
   } catch (error) {
     if (targetLease) await targetLease.release()
-    // Retain any partially created checkout for reconciliation; never delete an unknown result.
+    // Retain source reservation and partial checkout on failure. No new demand may
+    // run until the owner reconciles both; restart must never remove a stale lock.
     throw error
-  } finally { await sourceLease.release() }
+  }
 }
 export async function verifyWorkspace(policy: ApprovedPolicy, workspace: Workspace, options: { expectedSha: string; baseSha?: string; taskId?: string; clean?: boolean }): Promise<string[]> {
   options = z.strictObject({ expectedSha: GitShaSchema, baseSha: GitShaSchema.optional(), taskId: IdentifierSchema.optional(), clean: z.boolean().optional() }).parse(options)

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { z } from 'zod'
-import { loadCatalog, readMarkdown } from '@ioteams/catalog'
+import { loadCatalog } from '@ioteams/catalog'
 import { searchKnowledge, type KnowledgeIndex } from '@ioteams/knowledge'
 import type { Store, StoreEvent } from '@ioteams/storage'
 import {
@@ -10,6 +10,7 @@ import {
 } from '@ioteams/core'
 import { ApprovedPolicy, approvePolicy, canonicalJson, loadPolicy, preparePolicy, sha256 } from './policy.js'
 import { contains } from './paths.js'
+import { assertKnowledgeBinding, verifyCitation, recoveryQuery } from './knowledge-binding.js'
 import { fail, RuntimePolicyError } from './errors.js'
 import {
   DeveloperProposalSchema, FacilitatorProposalSchema, PlanningDemandSchema, PlanningIdentitySchema,
@@ -63,7 +64,9 @@ export class PlanningService {
       demand.requirements.length !== plan.tasks.length || demand.requirements.some(r => !plan.tasks.some(t => t.id === r.taskId)))
       fail('DEMAND_MISMATCH', 'Demanda e requisitos devem corresponder ao envelope do operador.')
     if (!policy.snapshot.corpusRoots.includes(this.options.catalogRoot)) fail('UNDECLARED_CORPUS', 'Declare a raiz do catálogo no envelope aprovado.')
+    await assertKnowledgeBinding(this.options.index, this.options.catalogRoot)
     const catalog = await loadCatalog(this.options.catalogRoot)
+    if (signal?.aborted) fail('PLANNING_INTERRUPTED', 'Planejamento cancelado após leitura do catálogo.')
     const team = catalog.map(e => e.metadata).find(e => e.kind === 'team' && e.id === demand.teamId)
     if (!team || team.kind !== 'team') fail('UNKNOWN_TEAM', 'Equipe escolhida ausente ou inválida.')
     for (const task of plan.tasks) if (!team.members.some(m => m.professionalId === task.professionalId && m.role === 'Developer'))
@@ -120,6 +123,7 @@ export class PlanningService {
       const sm = team.members.find(m => m.role === 'Scrum Master')!
       roles.push(await this.#consult(policy, demand, sm, { productGoal: product.productGoal,
         sprintGoal: product.sprintGoal, tasks, definitionOfDone: plan.definitionOfDone }, signal))
+      if (signal?.aborted) fail('PLANNING_INTERRUPTED', 'Planejamento cancelado após consultas.')
       const { version: _version, ...envelope } = policy.snapshot
       const snapshot = await preparePolicy({ ...envelope, plan: proposalPlan })
       const body = {
@@ -130,6 +134,7 @@ export class PlanningService {
         definitionOfDone: { id: `${demand.id}.dod`, criteria: plan.definitionOfDone }, roles, policy: snapshot,
       }
       const proposal = freeze({ ...body, hash: sha256(canonicalJson(body)) })
+      if (signal?.aborted) fail('PLANNING_INTERRUPTED', 'Planejamento cancelado antes de persistir proposta.')
       this.#event(demand.projectId, 'planning.proposed', proposal)
       return { status: 'proposed', proposal }
     } catch (error) {
@@ -140,14 +145,13 @@ export class PlanningService {
   }
   async #consult(policy: ApprovedPolicy, demand: z.infer<typeof PlanningDemandSchema>, identity: HostTurnInput['identity'], context: unknown, signal?: AbortSignal): Promise<PlanningRoleRecord> {
     identity = PlanningIdentitySchema.parse(identity)
+    await assertKnowledgeBinding(this.options.index, this.options.catalogRoot)
     const sources = await searchKnowledge(this.options.index, {
-      query: demand.goal.slice(0, 2048), filters: { professionalId: identity.professionalId, teamId: demand.teamId }, topK: 4, maxContextChars: 8000,
+      query: recoveryQuery(demand.goal), filters: { professionalId: identity.professionalId, teamId: demand.teamId }, topK: 4, maxContextChars: 8000,
     })
     if (sources.status !== 'evidence') fail('NO_EVIDENCE', 'Planejamento exige fontes verificáveis relevantes ao profissional.')
     for (const c of sources.citations) {
-      const source = await readMarkdown(this.options.catalogRoot, c.path)
-      if (sha256(source) !== c.contentHash || source.split('\n').slice(c.lineStart - 1, c.lineEnd).join('\n') !== c.excerpt)
-        fail('NO_EVIDENCE', 'Índice e catálogo configurados não correspondem.')
+      await verifyCitation(this.options.catalogRoot, c)
     }
     const outputSchema = identity.role === 'Product Owner' ? ProductProposalSchema : identity.role === 'Developer' ? DeveloperProposalSchema : FacilitatorProposalSchema
     // JSON schema is structural; free strings retain the core validation on output.
@@ -197,6 +201,7 @@ export class PlanningService {
       if (turnId && !terminal) { try { await session.host.interrupt(turnId) } catch { /* Disposal must still run; no retry of uncertain work. */ } }
       throw error
     } finally { await session.dispose() }
+
   }
   /** Call ONLY from an explicit human action carrying the reviewed proposal hash. Never expose as a model tool. */
   async approve(demandId: string, reviewedHash: string, directory: string): Promise<ApprovedPolicy> {

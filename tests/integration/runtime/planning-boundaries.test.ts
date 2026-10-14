@@ -73,3 +73,43 @@ it.each(['team', 'requirements', 'unknown control'])('rejects mismatched %s befo
   expect(f.inputs).toHaveLength(0)
   expect(f.store.list('demand')).toEqual([])
 })
+
+it('does not persist a proposal when cancellation arrives during final session disposal', async () => {
+  const f = await setup(), abort = new AbortController(); let count = 0
+  const createHost = async (request: Parameters<typeof f.factory>[0]) => {
+    const session = await f.factory(request), number = ++count
+    return { host: session.host, async dispose() { await session.dispose(); if (number === 3) abort.abort() } }
+  }
+  await expect(new PlanningService({ ...f.options, createHost }).propose(f.demand, f.policy, abort.signal)).rejects.toMatchObject({ code: 'PLANNING_INTERRUPTED' })
+  expect(f.store.eventsAfter(0).some(e => e.type === 'planning.proposed')).toBe(false)
+})
+
+it('rejects an index from a different corpus with identical Markdown and an unverifiable revision', async () => {
+  const f = await setup()
+  const { fixture } = await import('../knowledge/fixtures.js')
+  const { openKnowledge } = await import('@ioteams/knowledge')
+  const other = await fixture(), index = openKnowledge({ memory: true })
+  try {
+    await other.file('non-corpus.txt', 'Different repository revision')
+    await indexCatalog(index, { root: other.root, commitSha: other.commit() })
+    await expect(new PlanningService({ ...f.options, index }).propose(f.demand, f.policy)).rejects.toMatchObject({ code: 'NO_EVIDENCE' })
+    expect(f.inputs).toHaveLength(0)
+  } finally { index.close(); await other.cleanup() }
+})
+
+it('limits recovery terms deterministically while keeping a valid 33-term demand complete', async () => {
+  const f = await setup()
+  const { listCorpusMarkdown } = await import('@ioteams/catalog')
+  const { readFile, writeFile } = await import('node:fs/promises')
+  const { join } = await import('node:path')
+  const goal = 'Referência ' + Array.from({ length: 32 }, (_, i) => `termo${i}`).join(' ')
+  for (const path of await listCorpusMarkdown(f.corpus.root)) {
+    const file = join(f.corpus.root, path)
+    await writeFile(file, await readFile(file, 'utf8') + '\n## Demanda\n' + goal + '\n')
+  }
+  await indexCatalog(f.index, { root: f.corpus.root, commitSha: f.corpus.commit() })
+  const result = await new PlanningService(f.options).propose({ ...f.demand, goal }, f.policy)
+  expect(result.status).toBe('proposed')
+  expect(f.inputs).toHaveLength(3)
+  expect(f.inputs.every(input => JSON.parse(input.objective).demand.goal === goal)).toBe(true)
+})

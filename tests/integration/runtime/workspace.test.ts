@@ -245,3 +245,47 @@ it('checks every intermediate commit even when changes are later reverted', asyn
     await expect(verifyWorkspace(f.policy, workspace, { taskId: 'task-1', expectedSha: head })).rejects.toMatchObject({ code: 'OUT_OF_SCOPE' })
   } finally { await workspace.release() }
 })
+
+
+it('retains the original writer for the entire demand across roots and processes', async () => {
+  const f = await setup(), workspace = await createWorkspace(f.policy)
+  try {
+    const draft = await preparePolicy({ plan: f.plan, repository: f.repo, workspaceRoot: join(f.base, 'second-checkout'), trustedInstructions: [] })
+    const second = await approvePolicy(draft, draft.plan.policyHash, f.state)
+    await expect(createWorkspace(second)).rejects.toMatchObject({ code: 'WORKSPACE_BUSY' })
+    const child = promisify(execFile)(process.execPath, ['--import', createRequire(import.meta.url).resolve('tsx'), fileURLToPath(new URL('../../fixtures/runtime/writer.ts', import.meta.url)), f.source, f.state], { cwd: fileURLToPath(new URL('../../../', import.meta.url)), env: { PATH: process.env.PATH, HOME: f.base }, timeout: 5000 })
+    await expect(child).rejects.toMatchObject({ code: 2, stdout: 'WORKSPACE_BUSY\n' })
+  } finally { await workspace.release(); await workspace.release() }
+  const sourceWriter = await acquireWriter(f.repo, f.state); await sourceWriter.release()
+})
+
+it('detects merge resolution outside scope even when a second merge restores it', async () => {
+  const f = await setup(), workspace = await createWorkspace(f.policy)
+  try {
+    const original = await readFile(join(f.workspaceRoot, 'docs/persona.md'), 'utf8')
+    for (const [index, content] of ['unauthorized merge resolution', original].entries()) {
+      await git(f.workspaceRoot, 'checkout', '-b', `side-${index}`)
+      await writeFile(join(f.workspaceRoot, `src/side-${index}.ts`), 'side')
+      await git(f.workspaceRoot, 'add', 'src'); await git(f.workspaceRoot, 'commit', '-m', 'side')
+      await git(f.workspaceRoot, 'checkout', 'develop')
+      await writeFile(join(f.workspaceRoot, `src/main-${index}.ts`), 'main')
+      await git(f.workspaceRoot, 'add', 'src'); await git(f.workspaceRoot, 'commit', '-m', 'main')
+      await git(f.workspaceRoot, 'merge', '--no-ff', '--no-commit', `side-${index}`)
+      await writeFile(join(f.workspaceRoot, 'docs/persona.md'), content)
+      await git(f.workspaceRoot, 'add', 'docs'); await git(f.workspaceRoot, 'commit', '-m', 'merge')
+    }
+    const head = await git(f.workspaceRoot, 'rev-parse', 'HEAD')
+    await expect(verifyWorkspace(f.policy, workspace, { taskId: 'task-1', expectedSha: head, clean: true })).rejects.toMatchObject({ code: 'OUT_OF_SCOPE' })
+  } finally { await workspace.release() }
+})
+
+it('checks staged paths even when the worktree restores the original bytes', async () => {
+  const f = await setup(), workspace = await createWorkspace(f.policy)
+  try {
+    const original = await readFile(join(f.workspaceRoot, 'docs/persona.md'), 'utf8')
+    await writeFile(join(f.workspaceRoot, 'docs/persona.md'), 'staged out of scope')
+    await git(f.workspaceRoot, 'add', 'docs')
+    await writeFile(join(f.workspaceRoot, 'docs/persona.md'), original)
+    await expect(verifyWorkspace(f.policy, workspace, { taskId: 'task-1', expectedSha: f.plan.baseSha })).rejects.toMatchObject({ code: 'OUT_OF_SCOPE' })
+  } finally { await workspace.release() }
+})
