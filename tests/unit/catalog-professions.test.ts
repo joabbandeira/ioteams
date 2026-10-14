@@ -16,7 +16,11 @@ const engineeringProfessions = [
   { id: 'devops', groups: ['pilares', 'ciclos', 'artefatos', 'referencias'] },
   { id: 'engenharia-de-software', groups: ['pilares', 'ciclos', 'artefatos', 'referencias'] },
 ]
-const allProfessions = [...professions, ...engineeringProfessions]
+const aiProfessions = [
+  { id: 'engenharia-de-ia-aplicada', groups: ['pilares', 'ciclos', 'artefatos', 'referencias'] },
+  { id: 'engenharia-de-ia-generativa', groups: ['pilares', 'ciclos', 'artefatos', 'referencias'] },
+]
+const allProfessions = [...professions, ...engineeringProfessions, ...aiProfessions]
 const inSlice = (path: string) => allProfessions.some(({ id }) => path.startsWith(`profissoes/${id}/`))
 function links(tokens: Token[]): string[] {
   const result: string[] = []
@@ -55,6 +59,18 @@ it('descobre DevOps e Engenharia de Software e resolve ambas em um perfil indepe
   expect(catalog.find(entry => entry.kind === 'professional')?.professionIds).toEqual(['devops', 'engenharia-de-software'])
 })
 
+it('descobre as profissões de IA e resolve as duas competências sem depender de totais do catálogo', async () => {
+  const entries = (await loadCatalog(root)).filter(entry => aiProfessions.some(({ id }) => entry.metadata.id === id))
+  expect(entries.map(entry => entry.metadata.id).sort()).toEqual(['engenharia-de-ia-aplicada', 'engenharia-de-ia-generativa'])
+  expect(entries.every(entry => entry.metadata.kind === 'profession')).toBe(true)
+  const catalog = CatalogSchema.parse([...entries.map(entry => entry.metadata), {
+    version: 1, kind: 'professional', id: 'fixture-t04', name: 'Fixture T04', fictitious: true,
+    professionIds: ['engenharia-de-ia-aplicada', 'engenharia-de-ia-generativa'], stackIds: [],
+  }])
+  expect(catalog.find(entry => entry.kind === 'professional')?.professionIds)
+    .toEqual(['engenharia-de-ia-aplicada', 'engenharia-de-ia-generativa'])
+})
+
 it.each(allProfessions)('$id oferece navegação entre descrição, agrupamentos explicativos e fontes primárias', async ({ id, groups }) => {
   const base = `profissoes/${id}/`
   const description = `${base}descricao.md`
@@ -76,7 +92,8 @@ it.each(allProfessions)('$id oferece navegação entre descrição, agrupamentos
         return ['scrumguides.org', 'www.scrum.org', 'www.w3.org', 'spec.openapis.org', 'www.sqlite.org',
           'playwright.dev', 'martinfowler.com', 'dora.dev', 'sre.google', 'tag-app-delivery.cncf.io',
           'developer.hashicorp.com', 'opentelemetry.io', 'csrc.nist.gov', 'owasp.org',
-          'www.sei.cmu.edu', 'aws.amazon.com'].includes(new URL(href).hostname)
+          'www.sei.cmu.edu', 'aws.amazon.com', 'developers.openai.com', 'scikit-learn.org',
+          'developers.google.com', 'www.nist.gov', 'nvlpubs.nist.gov', 'arxiv.org'].includes(new URL(href).hostname)
       }), `Fonte primária: ${path}`).toBe(true)
     }
   }
