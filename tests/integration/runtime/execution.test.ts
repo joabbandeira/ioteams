@@ -1,13 +1,16 @@
 import { afterEach, expect, it } from 'vitest'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { ExecutionService } from '@ioteams/runtime'
 import { canonicalJson, sha256 } from '../../../packages/runtime/src/policy.js'
-import { executionFixture } from './execution.fixture.js'
+import { executionFixture, FixtureExecutionService as ExecutionService } from './execution.fixture.js'
 import { git } from '../../fixtures/runtime/repository.js'
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
-async function setup(options: Parameters<typeof executionFixture>[0] = {}) { const f = await executionFixture(options); cleanups.push(f.cleanup); return f }
+async function setup(options: Parameters<typeof executionFixture>[0] = {}) {
+  const creating = executionFixture(options)
+  cleanups.unshift(creating.cleanup)
+  return await creating
+}
 
 it('runs real checks, independent review and exact commit/push before DONE; duplicate calls have no effects', async () => {
   const f = await setup(), service = new ExecutionService(f)
@@ -273,7 +276,7 @@ it('reconciles durable intent, evidence and projections after reopening its task
     expect(store.list('evidence')).toHaveLength(1)
     expect(store.get('task', 'task-1')!.data.state.status).toBe('DONE')
     expect(f.counts()).toEqual({ implementations: 1, reviews: 1, checks: 1 })
-  } finally { store.close() }
+  } finally { await f.lifetime.drain(); store.close() }
 })
 
 it('accepts one explicitly bound approval and rejects concurrent duplicate responses before native RPC', async () => {

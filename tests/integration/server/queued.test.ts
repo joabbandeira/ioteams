@@ -1,15 +1,15 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { ExecutionService } from '@ioteams/runtime'
 import { openStore } from '@ioteams/storage'
 import { openKnowledge } from '@ioteams/knowledge'
 import { createDomainServices } from '../../../apps/server/src/services.js'
 import { createLocalServer } from '../../../apps/server/src/index.js'
-import { executionFixture } from '../runtime/execution.fixture.js'
+import { executionFixture, FixtureExecutionService as ExecutionService } from '../runtime/execution.fixture.js'
 import { git } from '../../fixtures/runtime/repository.js'
 const cleanup: (() => Promise<void> | void)[] = []
 afterEach(async () => { vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close() })
 async function setup() {
-  const f = await executionFixture(); cleanup.push(() => f.cleanup())
+  const creating = executionFixture(); cleanup.push(creating.cleanup)
+  const f = await creating
   const index = openKnowledge({ memory: true }); cleanup.push(() => index.close())
   let release!: () => void, entered!: () => void, provisioned = 0
   const held = new Promise<void>(resolve => { release = resolve }), provisioning = new Promise<void>(resolve => { entered = resolve })

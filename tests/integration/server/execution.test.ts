@@ -1,12 +1,12 @@
 import { afterEach, expect, it } from 'vitest'
-import { ExecutionService } from '@ioteams/runtime'
 import { openKnowledge } from '@ioteams/knowledge'
 import { createDomainServices } from '../../../apps/server/src/services.js'
-import { executionFixture } from '../runtime/execution.fixture.js'
+import { executionFixture, FixtureExecutionService as ExecutionService } from '../runtime/execution.fixture.js'
 const cleanup: (() => Promise<void> | void)[] = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
 async function setup(options: Parameters<typeof executionFixture>[0] = {}) {
-  const f = await executionFixture(options); cleanup.push(() => f.cleanup())
+  const creating = executionFixture(options); cleanup.push(creating.cleanup)
+  const f = await creating
   const index = openKnowledge({ memory: true }); cleanup.push(() => index.close())
   const service = createDomainServices({ store: f.store, index, catalogRoot: f.source, execution: new ExecutionService(f),
     executionContext: async () => ({ policy: f.policy, workspace: f.workspace }) })
@@ -42,7 +42,8 @@ it('answers only a versioned active approval and refuses duplicate or unknown re
     id: 'approval1', runId: 'r1', threadId: 'execution-thread-1', turnId: 'execution-turn-1', requestId: 'request1', kind: 'command', summary: 'Fixture approval', details: {}, status: 'pending',
   } }, ...events.slice(2)] : events })
   await f.service.execute({ resource: 'runs', body: { id: 'r1', planId: f.plan.id } }, f.signal)
-  await expect.poll(() => f.store.list('approval').length).toBe(1)
+  try { await expect.poll(() => f.store.list('approval').length).toBe(1) }
+  catch (error) { throw new Error(`Approval observation: ${JSON.stringify({ status: f.store.get('run', 'r1')?.data.status, counts: f.counts(), phases: f.phases })}`, { cause: error }) }
   const approval = f.store.list('approval')[0]
   const command = { resource: 'approvals' as const, id: approval.data.id, action: 'decide', body: { expectedVersion: approval.version, decision: 'decline' } }
   expect(await f.service.execute(command, f.signal)).toEqual({ id: approval.data.id, status: 'decided' })

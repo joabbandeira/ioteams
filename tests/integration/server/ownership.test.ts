@@ -1,20 +1,20 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { ExecutionService } from '@ioteams/runtime'
 import { openStore } from '@ioteams/storage'
 import { openKnowledge } from '@ioteams/knowledge'
 import { createDomainServices } from '../../../apps/server/src/services.js'
-import { executionFixture } from '../runtime/execution.fixture.js'
+import { executionFixture, FixtureExecutionService as ExecutionService } from '../runtime/execution.fixture.js'
 const cleanup: (() => Promise<void> | void)[] = []
 afterEach(async () => { vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close() })
-async function setup(approval = false) {
+async function setup(approval = false, guardAt = 1) {
   const id = 'guard-run'
-  const f = await executionFixture({ events: (events, phase) => approval && phase === 'implement' ? [...events.slice(0, 2), {
+  const creating = executionFixture({ events: (events, phase) => approval && phase === 'implement' ? [...events.slice(0, 2), {
     type: 'approval.requested', request: { id: 'approval-guard', requestId: 'request-guard', runId: id, threadId: 'execution-thread-1', turnId: 'execution-turn-1', kind: 'command', summary: 'Fixture', details: {}, status: 'pending' },
-  }, ...events.slice(2)] : events }); cleanup.push(() => f.cleanup())
+  }, ...events.slice(2)] : events }); cleanup.push(creating.cleanup)
+  const f = await creating
   const index = openKnowledge({ memory: true }); cleanup.push(() => index.close())
-  let release!: () => void, entered!: () => void, once = true
+  let release!: () => void, entered!: () => void, guardCount = 0
   const held = new Promise<void>(resolve => { release = resolve }), guarding = new Promise<void>(resolve => { entered = resolve })
-  const workspace = { ...f.workspace, async assertOwned() { if (once) { once = false; entered(); await held }; await f.workspace.assertOwned() } }
+  const workspace = { ...f.workspace, async assertOwned() { if (++guardCount === guardAt) { entered(); await held }; await f.workspace.assertOwned() } }
   const execution = new ExecutionService(f)
   const options = { store: f.store, index, catalogRoot: f.source, execution, executionContext: async () => ({ policy: f.policy, workspace }) }
   const service = createDomainServices(options); cleanup.push(async () => { release(); await service.close!() })
@@ -110,5 +110,86 @@ it('does not invoke the executor when the persisted resume claim transaction rol
   await expect(f.service.execute({ resource: 'runs', id: f.id, action: 'resume', body: { expectedVersion: await version() } }, f.signal)).rejects.toThrow('claim rollback')
   await expect.poll(() => invoked > 0 || f.store.eventsAfter(before).some(e => e.type === 'api.job.failed')).toBe(true)
   expect(invoked).toBe(0)
+  expect(f.counts()).toEqual({ implementations: 0, reviews: 0, checks: 0 })
+})
+
+it.each(['pause', 'cancel'] as const)('revalidates a local %s after its old job settles and another connection claims resume', async action => {
+  const f = await setup(true, 2)
+  await f.service.execute({ resource: 'runs', body: { id: f.id, planId: f.plan.id } }, f.signal); await f.guarding
+  const version = (await f.service.read('runs', f.id, {}) as { version: number }).version
+  let terminal = false, injected = false, resumed: Promise<unknown> | undefined
+  const append = f.store.appendEvent.bind(f.store), transaction = f.store.transaction.bind(f.store)
+  vi.spyOn(f.store, 'appendEvent').mockImplementation(event => {
+    const result = append(event)
+    if (event.type === 'api.job.finished' && (event.data as { key?: string }).key === `run:${f.id}`) terminal = true
+    return result
+  })
+  vi.spyOn(f.store, 'transaction').mockImplementation(operation => {
+    const result = transaction(operation)
+    if (terminal && !injected) {
+      injected = true
+      const current = f.store.get('run', f.id)!
+      resumed = f.replacement.execute({ resource: 'runs', id: f.id, action: 'resume', body: { expectedVersion: current.version + 1 } }, f.signal)
+    }
+    return result
+  })
+  const controlling = f.service.execute({ resource: 'runs', id: f.id, action, body: { expectedVersion: version } }, f.signal)
+  const outcome = expect(controlling).rejects.toMatchObject({ code: 'RECONCILIATION_REQUIRED' })
+  f.release(); await outcome; await resumed
+  expect(injected).toBe(true)
+  await expect.poll(() => f.store.get('run', f.id)?.data.status).toBe('awaiting_approval')
+  expect(await f.service.read('runs', f.id, {})).toMatchObject({ data: { status: 'awaiting_approval' } })
+  expect(f.counts()).toEqual({ implementations: 1, reviews: 0, checks: 0 })
+})
+it('rejects an awaited local cancel when another control changes the same-generation terminal version', async () => {
+  const f = await setup(true, 2)
+  await f.service.execute({ resource: 'runs', body: { id: f.id, planId: f.plan.id } }, f.signal); await f.guarding
+  const version = (await f.service.read('runs', f.id, {}) as { version: number }).version
+  let terminal = false, injected = false, paused: Promise<unknown> | undefined
+  const append = f.store.appendEvent.bind(f.store), transaction = f.store.transaction.bind(f.store)
+  vi.spyOn(f.store, 'appendEvent').mockImplementation(event => {
+    const result = append(event)
+    if (event.type === 'api.job.finished' && (event.data as { key?: string }).key === `run:${f.id}`) terminal = true
+    return result
+  })
+  vi.spyOn(f.store, 'transaction').mockImplementation(operation => {
+    const result = transaction(operation)
+    if (terminal && !injected) {
+      injected = true
+      const current = f.store.get('run', f.id)!
+      paused = f.replacement.execute({ resource: 'runs', id: f.id, action: 'pause', body: { expectedVersion: current.version + 1 } }, f.signal)
+    }
+    return result
+  })
+  const controlling = f.service.execute({ resource: 'runs', id: f.id, action: 'cancel', body: { expectedVersion: version } }, f.signal)
+  const outcome = expect(controlling).rejects.toMatchObject({ code: 'RECONCILIATION_REQUIRED' })
+  f.release(); await outcome; await paused
+  expect(injected).toBe(true)
+  expect(f.store.get('run', f.id)?.data.status).toBe('paused')
+  expect(f.counts()).toEqual({ implementations: 0, reviews: 0, checks: 0 })
+})
+it('revalidates the observed generation for a control with no local job even when the numeric version is unchanged', async () => {
+  const f = await setup(true, 2)
+  await f.service.execute({ resource: 'runs', body: { id: f.id, planId: f.plan.id } }, f.signal); await f.guarding
+  const readVersion = async () => (await f.service.read('runs', f.id, {}) as { version: number }).version
+  const pausing = f.service.execute({ resource: 'runs', id: f.id, action: 'pause', body: { expectedVersion: await readVersion() } }, f.signal)
+  f.release(); await pausing
+  const version = await readVersion(), transaction = f.store.transaction.bind(f.store)
+  vi.spyOn(f.store, 'transaction').mockImplementationOnce(operation => {
+    for (const type of ['started', 'failed']) f.replacementStore.appendEvent({ id: `foreign-${type}`, projectId: f.plan.projectId,
+      type: `api.job.${type}`, at: new Date().toISOString(), data: { key: `run:${f.id}`, jobId: 'other-finished-generation', version } })
+    return transaction(operation)
+  })
+  await expect(f.service.execute({ resource: 'runs', id: f.id, action: 'cancel', body: { expectedVersion: version } }, f.signal)).rejects.toMatchObject({ code: 'RECONCILIATION_REQUIRED' })
+  expect(f.store.get('run', f.id)?.data.status).toBe('paused')
+  expect(f.counts()).toEqual({ implementations: 0, reviews: 0, checks: 0 })
+})
+it('does not treat a terminal generation without its final version as complete control proof', async () => {
+  const f = await setup()
+  f.store.create('run', { id: f.id, projectId: f.plan.projectId, planId: f.plan.id, status: 'paused' })
+  for (const type of ['started', 'finished']) f.store.appendEvent({ id: `legacy-${type}`, projectId: f.plan.projectId,
+    type: `api.job.${type}`, at: new Date().toISOString(), data: { key: `run:${f.id}`, jobId: 'legacy-without-version' } })
+  await expect(f.service.execute({ resource: 'runs', id: f.id, action: 'cancel', body: { expectedVersion: 1 } }, f.signal)).rejects.toMatchObject({ code: 'RECONCILIATION_REQUIRED' })
+  expect(f.store.get('run', f.id)?.data.status).toBe('paused')
   expect(f.counts()).toEqual({ implementations: 0, reviews: 0, checks: 0 })
 })

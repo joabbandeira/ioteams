@@ -72,10 +72,12 @@ export function createDomainServices(options: DomainServiceOptions): ApiServices
     const started = history.filter(e => e.type === 'api.job.started' && (e.data as Record<string, JsonValue>)?.key === key).at(-1)
     const jobId = (started?.data as Record<string, JsonValue> | undefined)?.jobId
     // Legacy/incomplete ownership is uncertainty, never evidence that an external writer stopped.
-    if (!started || typeof jobId !== 'string') return { jobId: undefined, settled: false }
-    const settled = history.some(e => e.sequence > started.sequence && ['api.job.finished', 'api.job.failed'].includes(e.type) &&
+    if (!started || typeof jobId !== 'string') return { jobId: undefined, settled: false, version: undefined }
+    const terminal = history.find(e => e.sequence > started.sequence && ['api.job.finished', 'api.job.failed'].includes(e.type) &&
       (e.data as Record<string, JsonValue>)?.key === key && (e.data as Record<string, JsonValue>)?.jobId === jobId)
-    return { jobId, settled }
+    const version = (terminal?.data as Record<string, JsonValue> | undefined)?.version
+    const finalVersion = typeof version === 'number' && Number.isSafeInteger(version) && version > 0 ? version : undefined
+    return { jobId, settled: !!terminal && finalVersion !== undefined, version: finalVersion }
   }
   function ownedJob(id: string) {
     const job = jobs.get(`run:${id}`)
@@ -118,7 +120,8 @@ export function createDomainServices(options: DomainServiceOptions): ApiServices
     const finish = (type: 'finished' | 'failed') => store.transaction(() => {
       // Publish terminal proof only AFTER the owner's final domain writes, atomically.
       if (settleStop) finishQueuedStop(key.slice(4))
-      event(projectId, `api.job.${type}`, { key, jobId, ...(type === 'failed' ? { reason: 'RUNTIME_CONFLICT' } : {}) })
+      const version = key.startsWith('run:') ? runRecord(key.slice(4))?.version : undefined
+      event(projectId, `api.job.${type}`, { key, jobId, ...(version === undefined ? {} : { version }), ...(type === 'failed' ? { reason: 'RUNTIME_CONFLICT' } : {}) })
     })
     const done = result.then(() => finish('finished'), () => finish('failed')).finally(() => {
       if (jobs.get(key)?.jobId === jobId) jobs.delete(key)
@@ -355,13 +358,18 @@ export function createDomainServices(options: DomainServiceOptions): ApiServices
         if (run.data.status === 'completed' || run.data.status === 'cancelled' && action !== 'reconcile') throw new ApiError(409, 'TERMINAL_RUN')
         controls.add(id)
         try {
-          const job = ownedJob(id)
+          const observedActivity = runActivity(id), job = ownedJob(id)
+          if (job && job.jobId !== observedActivity.jobId) throw new ApiError(409, 'RECONCILIATION_REQUIRED')
           if (action === 'pause' || action === 'cancel') {
             if (job && !job.interruptible) throw new ApiError(409, 'BUSY')
             if (!job && !runActivity(id).settled) throw new ApiError(409, 'RECONCILIATION_REQUIRED')
             if (job) { job.controller.abort(); await job.done }
             return store.transaction(() => {
-              if (!job && (!runActivity(id).settled || runRecord(id)!.version !== value.expectedVersion)) throw new ApiError(409, 'RECONCILIATION_REQUIRED')
+              const currentActivity = runActivity(id)
+              const expectedGeneration = job?.jobId ?? observedActivity.jobId
+              const expectedVersion = job ? currentActivity.version : value.expectedVersion
+              if (!expectedGeneration || currentActivity.jobId !== expectedGeneration || !currentActivity.settled ||
+                expectedVersion === undefined || runRecord(id)?.version !== expectedVersion) throw new ApiError(409, 'RECONCILIATION_REQUIRED')
               const current = store.get('run', id)!
               if (current.data.status === 'completed') return { id, status: 'completed' }
               const status = action === 'pause' ? 'paused' : 'cancelled'
@@ -375,7 +383,8 @@ export function createDomainServices(options: DomainServiceOptions): ApiServices
           // Claim a distinct persisted generation before ANY async context/runtime boundary.
           const activity = store.transaction(() => {
             if (runRecord(id)!.version !== value.expectedVersion) throw new ConflictError()
-            if (!runActivity(id).settled) throw new ApiError(409, 'RECONCILIATION_REQUIRED')
+            const currentActivity = runActivity(id)
+            if (!currentActivity.settled || currentActivity.jobId !== observedActivity.jobId) throw new ApiError(409, 'RECONCILIATION_REQUIRED')
             return startJob(`run:${id}`, run.data.projectId, signal, async activeSignal => {
               const bound = await context(run.data.planId, id, activeSignal)
               if (runRecord(id)!.version !== value.expectedVersion) throw new ConflictError()
