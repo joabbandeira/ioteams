@@ -137,3 +137,34 @@ it('cleans a cancelled factory setup even when it never returns a fixture to its
   await expect(creating).rejects.toMatchObject({ name: 'AbortError' })
   await creating.cleanup()
 })
+
+
+it('keeps a native check fixture leased until its interrupted process has closed', async () => {
+  const { nativeCheckFixture } = await import('../runtime/checks.fixture.js')
+  const { assertCheckCommand } = await import('@ioteams/runtime')
+  const { access } = await import('node:fs/promises')
+  const { dirname, join } = await import('node:path')
+  const f = await nativeCheckFixture(`import fs from 'node:fs'; fs.writeFileSync('src/check-ready', 'ready'); setInterval(()=>{},1000)`)
+  const sandbox = await f.createSandbox({ policy: f.policy, taskId: 'task-1', runtimeHome: f.runtimeHome, codexExecutable: f.executable, searchPath: [dirname(f.node)] })
+  const command = await assertCheckCommand(f.policy, 'task-1', f.plan.tasks[0].checks[0])
+  let pending = true, releasedEarly = false
+  const release = f.workspace.release.bind(f.workspace)
+  const guard = vi.spyOn(f.workspace, 'release').mockImplementation(async () => {
+    if (pending) { releasedEarly = true; throw new Error('Unsafe native-check release prevented by regression probe') }
+    await release()
+  })
+  const running = sandbox.execute(command).finally(() => { pending = false })
+  void running.catch(() => {})
+  let cleaning: Promise<void> | undefined
+  try {
+    await f.lifetime.run(() => expect.poll(() => access(join(f.workspaceRoot, 'src/check-ready')).then(() => true).catch(() => false), { timeout: 7000 }).toBe(true), 'check-readiness')
+    cleaning = f.cleanup(); void cleaning.catch(() => {})
+    expect(releasedEarly).toBe(false)
+    await expect(running).rejects.toMatchObject({ code: 'CHECK_INTERRUPTED' })
+    await cleaning
+    await expect(access(f.base)).rejects.toMatchObject({ code: 'ENOENT' })
+  } finally {
+    f.lifetime.controller.abort(); await running.catch(() => {}); await cleaning?.catch(() => {})
+    guard.mockRestore(); await f.cleanup()
+  }
+}, 20_000)

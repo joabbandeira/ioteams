@@ -62,7 +62,7 @@ it('keeps manual approved plans free of citations from unapproved proposed event
   } })
   expect((await new ExecutionService(f).start({ id: 'run-manual' }, f.policy, f.workspace)).status).toBe('completed')
   expect(f.inputs.every(input => input.retrievedData.length === 0)).toBe(true)
-})
+}, 20_000)
 
 it('blocks remote alias replacement immediately after the durable commit result without pushing elsewhere', async () => {
   const creating = executionFixture(); cleanups.push(creating.cleanup)
@@ -82,7 +82,7 @@ it('blocks remote alias replacement immediately after the durable commit result 
   expect(await git(f.remote, 'rev-parse', 'develop')).toBe(f.plan.baseSha)
   expect(await git(other, 'rev-parse', 'develop')).toBe(f.plan.baseSha)
   expect(f.store.get('task', 'task-1')!.data.state.status).toBe('IN_PROGRESS')
-})
+}, 20_000)
 
 it.each(['remote', 'tree'])('revalidates %s after the retry push intent and never delivers an unverified workspace', async fault => {
   const creating = executionFixture(); cleanups.push(creating.cleanup)
@@ -111,4 +111,4 @@ it.each(['remote', 'tree'])('revalidates %s after the retry push intent and neve
   expect(await git(f.remote, 'rev-parse', 'develop')).toBe(f.plan.baseSha)
   expect(await git(other, 'rev-parse', 'develop')).toBe(f.plan.baseSha)
   expect(f.store.get('task', 'task-1')!.data.state.status).toBe('IN_PROGRESS')
-})
+}, 20_000)

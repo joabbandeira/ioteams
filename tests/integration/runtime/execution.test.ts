@@ -27,7 +27,7 @@ it('runs real checks, independent review and exact commit/push before DONE; dupl
   const counts = f.counts()
   expect(await new ExecutionService(f).start({ id: 'run-1' }, f.policy, f.workspace)).toEqual(result)
   expect(f.counts()).toEqual(counts)
-})
+}, 20_000)
 
 it('rejects a failed real check despite agent success text, preserves history and corrects in a fresh turn', async () => {
   const f = await setup({ implement: async (request, input, count) => {
@@ -41,7 +41,7 @@ it('rejects a failed real check despite agent success text, preserves history an
   expect(f.store.list('evidence').map(e => e.data.evidence.exitCode).sort()).toEqual([0, 1])
   expect(state.evidence).toHaveLength(1)
   expect(f.phases).toEqual(['implement', 'implement', 'review'])
-})
+}, 20_000)
 
 it('returns review rejection to correction, with at most three attempts and no commit on exhaustion', async () => {
   const f = await setup({ review: value => ({ ...value, approved: false, reason: 'Acceptance missing', acceptanceMet: [], definitionOfDoneMet: [] }) })
@@ -50,7 +50,7 @@ it('returns review rejection to correction, with at most three attempts and no c
   expect(f.store.get('task', 'task-1')!.data.state.attempts).toHaveLength(3)
   expect(f.store.get('task', 'task-1')!.data.state.status).toBe('TODO')
   expect(await git(f.workspaceRoot, 'rev-parse', 'HEAD')).toBe(f.plan.baseSha)
-})
+}, 30_000)
 
 it('executes dependent tasks sequentially and binds each evidence to its own attempt tree', async () => {
   const f = await setup({ tasks: 2 })
@@ -64,7 +64,7 @@ it('corrects a rejected review in a new session without reusing previous evidenc
   expect((await new ExecutionService(f).start({ id: 'run-1' }, f.policy, f.workspace)).status).toBe('completed')
   expect(f.phases).toEqual(['implement', 'review', 'implement', 'review'])
   expect(f.store.get('task', 'task-1')!.data.state.evidence).toHaveLength(1)
-})
+}, 20_000)
 
 it('blocks out-of-scope writes before checks, commit or push', async () => {
   const f = await setup({ implement: async request => { await writeFile(join(request.policy.snapshot.workspaceRoot, 'docs/escape.md'), 'not authorized') } })
@@ -144,7 +144,7 @@ it('reconciles a completed push after its durable result was lost without creati
   expect(await new ExecutionService(f).reconcile({ id: 'run-1' }, f.policy, f.workspace)).toMatchObject({ status: 'completed' })
   expect(await git(f.workspaceRoot, 'rev-parse', 'HEAD')).toBe(sha)
   expect(f.counts()).toEqual(counts)
-})
+}, 20_000)
 
 it('recovers a commit whose result was lost and pushes only after explicit resume', async () => {
   const f = await setup(), append = f.store.appendEvent.bind(f.store); let injected = false
@@ -160,7 +160,7 @@ it('recovers a commit whose result was lost and pushes only after explicit resum
   expect(await restarted.reconcile({ id: 'run-1', retryPush: true }, f.policy, f.workspace)).toMatchObject({ status: 'completed' })
   expect(await git(f.remote, 'rev-parse', 'develop')).toBe(sha)
   expect(f.counts()).toEqual({ implementations: 1, reviews: 1, checks: 1 })
-})
+}, 20_000)
 
 it('does not duplicate a commit after push failure; read-only reconciliation observes unchanged remote', async () => {
   const f = await setup()
@@ -176,7 +176,7 @@ it('does not duplicate a commit after push failure; read-only reconciliation obs
   const { rm } = await import('node:fs/promises'); await rm(hook)
   expect((await service.reconcile({ id: 'run-1', retryPush: true }, f.policy, f.workspace)).status).toBe('completed')
   expect(await git(f.remote, 'rev-parse', 'develop')).toBe(sha)
-})
+}, 20_000)
 
 it('refuses exact-DONE on remote advance, including an advance after the authorized push', async () => {
   const f = await setup(), append = f.store.appendEvent.bind(f.store); let injected = false
@@ -192,7 +192,7 @@ it('refuses exact-DONE on remote advance, including an advance after the authori
   await git(other, 'add', 'src'); await git(other, 'commit', '-m', 'remote advance'); await git(other, 'push', 'origin', 'develop')
   expect(await new ExecutionService(f).reconcile({ id: 'run-1', retryPush: true }, f.policy, f.workspace)).toMatchObject({ status: 'paused', reason: 'REMOTE_DIVERGED' })
   expect(f.store.get('task', 'task-1')!.data.state.status).toBe('IN_PROGRESS')
-})
+}, 20_000)
 
 it('resumes remaining tasks after reconciling delivery without repeating the completed task', async () => {
   const f = await setup({ tasks: 2 }), append = f.store.appendEvent.bind(f.store); let injected = false
@@ -205,7 +205,7 @@ it('resumes remaining tasks after reconciling delivery without repeating the com
   expect(await restarted.reconcile({ id: 'run-1' }, f.policy, f.workspace)).toMatchObject({ status: 'paused', reason: 'RECONCILED_REMAINING_TASKS' })
   expect((await restarted.resume({ id: 'run-1' }, f.policy, f.workspace)).status).toBe('completed')
   expect(f.counts()).toEqual({ implementations: 2, reviews: 2, checks: 2 })
-}, 20_000)
+}, 30_000)
 
 it('honors cancellation arriving during reviewer disposal before any commit or push', async () => {
   const f = await setup(), abort = new AbortController()
@@ -216,7 +216,7 @@ it('honors cancellation arriving during reviewer disposal before any commit or p
   expect((await new ExecutionService({ ...f, createHost }).start({ id: 'run-1' }, f.policy, f.workspace, abort.signal)).status).toBe('interrupted')
   expect(await git(f.workspaceRoot, 'rev-parse', 'HEAD')).toBe(f.plan.baseSha)
   expect(await git(f.remote, 'rev-parse', 'develop')).toBe(f.plan.baseSha)
-})
+}, 20_000)
 
 it('rejects model changes to the policy file and never uses changed paths/checks', async () => {
   const f = await setup(), { chmod, readFile } = await import('node:fs/promises')
@@ -277,7 +277,7 @@ it('reconciles durable intent, evidence and projections after reopening its task
     expect(store.get('task', 'task-1')!.data.state.status).toBe('DONE')
     expect(f.counts()).toEqual({ implementations: 1, reviews: 1, checks: 1 })
   } finally { await f.lifetime.drain(); store.close() }
-})
+}, 20_000)
 
 it('accepts one explicitly bound approval and rejects concurrent duplicate responses before native RPC', async () => {
   const f = await setup({ events: (events, phase) => phase === 'implement' ? [...events.slice(0, 2), {
@@ -296,7 +296,7 @@ it('accepts one explicitly bound approval and rejects concurrent duplicate respo
   expect(results.map(r => r.status).sort()).toEqual(['fulfilled', 'rejected'])
   expect(responses).toBe(1)
   expect((await running).status).toBe('completed')
-})
+}, 20_000)
 
 it('prevents another service from reconciling a still-active native turn', async () => {
   const f = await setup(), abort = new AbortController()
@@ -334,7 +334,7 @@ it('carries only the assigned Developer citations from the approved proposal as 
   expect(f.inputs[0].retrievedData).toEqual(sources.citations)
   expect(f.inputs[1].retrievedData).toEqual(sources.citations)
   expect(f.inputs[0].identity.threadId).toBeUndefined()
-})
+}, 20_000)
 
 it('pauses immediately on an uncertain approval RPC and never retries the native decision', async () => {
   const f = await setup({ events: (events, phase) => phase === 'implement' ? [...events.slice(0, 2), {

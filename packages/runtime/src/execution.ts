@@ -26,6 +26,7 @@ export interface ExecutionServiceOptions {
   createCheckSandbox(request: { policy: ApprovedPolicy; taskId: string }, signal?: AbortSignal): Promise<CheckSandbox>
 }
 export interface ExecutionResult { id: string; status: RunStatus; reason?: string }
+interface PendingCheckClosure { fault: RuntimePolicyError; confirm(): Promise<void>; finished: Promise<void> }
 interface ActiveTurn { runId: string; host: HostAdapter; requestId?: string; denied: boolean; signal: AbortSignal; abort(): void; fault?: string; response?: Promise<void> }
 const reviewSchema = z.strictObject({ taskId: IdentifierSchema, attemptId: IdentifierSchema, testedTreeHash: GitShaSchema,
   approved: z.boolean(), acceptanceMet: z.array(z.string()).max(100), definitionOfDoneMet: z.array(z.string()).max(100), reason: z.string().min(1).max(4000).optional() })
@@ -48,6 +49,7 @@ export class ExecutionService {
   #busy = false
   #hosts = new WeakSet<HostAdapter>()
   #approvalResponses = new Set<string>()
+  #pendingChecks = new Map<string, PendingCheckClosure>()
   #active?: ActiveTurn
   constructor(private readonly options: ExecutionServiceOptions) {}
   #events(id: string): StoreEvent[] {
@@ -67,6 +69,8 @@ export class ExecutionService {
     return this.status(id)
   }
   status(id: string): ExecutionResult {
+    const pending = this.#pendingChecks.get(id)
+    if (pending) return { id, status: 'blocked', reason: pending.fault.code }
     const run = this.options.store.get('run', id)
     if (!run) fail('UNKNOWN_RUN', 'Execução não encontrada.')
     const event = this.#events(id).filter(e => e.type === 'execution.status').at(-1)
@@ -133,6 +137,34 @@ export class ExecutionService {
   }
   async #executePlan(id: string, policy: ApprovedPolicy, workspace: Workspace, signal?: AbortSignal): Promise<ExecutionResult> {
     this.#busy = true; activeWorkspaces.add(workspace.repository.root)
+    let releasable = true, finish!: () => void
+    const finished = new Promise<void>(resolve => { finish = resolve })
+    const closeCheck = async (operation: () => Promise<void>) => {
+      const closing = Promise.resolve().then(operation)
+      let rejected = false
+      void closing.catch(() => { rejected = true })
+      try { await dispose(() => closing) }
+      catch (cause) {
+        releasable = false
+        const fault = Object.assign(new RuntimePolicyError('CHECK_TERMINATION_UNCERTAIN', 'Encerramento do check não confirmado; workspace permanece reservado.'), { cause })
+        let prove!: () => void
+        const proof = new Promise<void>(resolve => { prove = resolve })
+        // A failed publication cannot bypass the in-memory ownership barrier.
+        // Explicit owner reconciliation may ask the same trusted disposer for
+        // closure proof; it cannot accept client assertions or launch a check.
+        this.#pendingChecks.set(id, { fault, finished, async confirm() {
+          await (rejected ? operation() : closing)
+          prove()
+        } })
+        void closing.then(prove, () => {})
+        try { this.#state(id, 'blocked', fault.code) }
+        catch (publication) { fault.cause = new AggregateError([cause, publication], 'Falha ao persistir bloqueio de término incerto.') }
+        await proof
+        this.#pendingChecks.delete(id)
+        releasable = true
+        throw fault
+      }
+    }
     try {
       const plan = policy.snapshot.plan
       let head = this.#events(id).filter(e => e.type === 'execution.commit.result' && this.#task((e.data as { taskId: string }).taskId).status === 'DONE').map(e => (e.data as { sha: string }).sha).at(-1) ?? plan.baseSha
@@ -166,10 +198,13 @@ export class ExecutionService {
             this.#event(id, 'check.intent', { taskId: task.id, attemptId, command: check, ...tree })
             const checkSignal = AbortSignal.any([AbortSignal.timeout(check.timeoutMs), turnSignal])
             const factory = this.options.createCheckSandbox({ policy, taskId: task.id }, checkSignal)
-            const sandbox = await bounded(factory, checkSignal).catch(error => { void factory.then(s => dispose(() => s.dispose())).catch(() => {}); throw error })
+            const sandbox = await bounded(factory, checkSignal).catch(async error => {
+              await closeCheck(() => factory.then(s => s.dispose(), () => {}))
+              throw error
+            })
             const startedAt = now()
             let result
-            try { result = await bounded(sandbox.execute(command, checkSignal), checkSignal) } finally { await dispose(() => sandbox.dispose()) }
+            try { result = await bounded(sandbox.execute(command, checkSignal), checkSignal) } finally { await closeCheck(() => sandbox.dispose()) }
             const finishedAt = now()
             assertActive(turnSignal)
             await this.#guard(policy, workspace, task.id, head, head); await assertTree(workspace.repository.root, tree)
@@ -198,7 +233,7 @@ export class ExecutionService {
       }
       return this.#state(id, 'completed')
     } catch (error) { return this.#failure(id, error, signal) }
-    finally { this.#busy = false; activeWorkspaces.delete(workspace.repository.root) }
+    finally { if (releasable) { this.#busy = false; activeWorkspaces.delete(workspace.repository.root) }; finish() }
   }
   #reject(id: string, taskId: string, reason: string) {
     this.options.store.transaction(() => {
@@ -209,6 +244,7 @@ export class ExecutionService {
   #failure(id: string, error: unknown, signal?: AbortSignal): ExecutionResult {
     const code = error instanceof RuntimePolicyError ? error.code : 'EXECUTION_INFRASTRUCTURE'
     const paused = ['GIT_FAILED', 'PUSH_UNCERTAIN', 'REMOTE_DIVERGED', 'COMMIT_UNCERTAIN', 'APPROVAL_UNCERTAIN', 'NATIVE_APPROVAL_DENIED', 'HOST_ERROR', 'HOST_INCOMPLETE', 'EXECUTION_INTERRUPTED', 'CHECK_INFRASTRUCTURE', 'CHECK_TIMEOUT', 'CHECK_INTERRUPTED', 'EXECUTION_INFRASTRUCTURE'].includes(code)
+    if (code === 'CHECK_TERMINATION_UNCERTAIN') return this.#state(id, 'blocked', code)
     return this.#state(id, signal?.aborted ? 'interrupted' : paused ? 'paused' : 'blocked', code)
   }
   async #sources(policy: ApprovedPolicy, task: PlannedTask) {
@@ -398,6 +434,12 @@ export class ExecutionService {
     const { id, retryPush } = z.strictObject({ id: IdentifierSchema, retryPush: z.boolean().default(false) }).parse(raw)
     const policy = await this.#authority(authority)
     this.#binding(id, policy, workspace)
+    const pending = this.#pendingChecks.get(id)
+    if (pending) {
+      try { await dispose(() => pending.confirm()) }
+      catch (cause) { throw Object.assign(new RuntimePolicyError('CHECK_TERMINATION_UNCERTAIN', 'Disposer confiável ainda não confirmou encerramento.'), { cause }) }
+      await pending.finished
+    }
     if (this.#busy || this.#active || activeWorkspaces.has(workspace.repository.root)) fail('EXECUTION_BUSY', 'Execução ainda ativa; aguarde liberação.')
     if (this.status(id).status === 'completed') return this.status(id)
     this.#busy = true; activeWorkspaces.add(workspace.repository.root)

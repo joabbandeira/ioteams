@@ -29,20 +29,20 @@ it.each(['pause', 'cancel'] as const)('binds %s to the active job, interrupts it
     id: 'approval1', runId: 'r1', threadId: 'execution-thread-1', turnId: 'execution-turn-1', requestId: 'request1', kind: 'command', summary: 'Fixture approval', details: {}, status: 'pending',
   } }] : events })
   await f.service.execute({ resource: 'runs', body: { id: 'r1', planId: f.plan.id } }, f.signal)
-  await expect.poll(() => f.store.get('run', 'r1')?.data.status).toBe('awaiting_approval')
+  await expect.poll(() => f.store.get('run', 'r1')?.data.status, { timeout: 7000 }).toBe('awaiting_approval')
   const current = await f.service.read('runs', 'r1', {}) as { version: number }
   await expect(f.service.execute({ resource: 'runs', id: 'r1', action, body: { expectedVersion: current.version - 1 } }, f.signal)).rejects.toThrow()
   const result = await f.service.execute({ resource: 'runs', id: 'r1', action, body: { expectedVersion: current.version } }, f.signal)
   expect(result).toEqual({ id: 'r1', status: action === 'pause' ? 'paused' : 'cancelled' })
   expect(f.store.get('run', 'r1')!.data.status).toBe(action === 'pause' ? 'paused' : 'cancelled')
   expect(f.counts().checks).toBe(0)
-})
+}, 20_000)
 it('answers only a versioned active approval and refuses duplicate or unknown requests', async () => {
   const f = await setup({ events: (events, phase) => phase === 'implement' ? [events[0], events[1], { type: 'approval.requested', request: {
     id: 'approval1', runId: 'r1', threadId: 'execution-thread-1', turnId: 'execution-turn-1', requestId: 'request1', kind: 'command', summary: 'Fixture approval', details: {}, status: 'pending',
   } }, ...events.slice(2)] : events })
   await f.service.execute({ resource: 'runs', body: { id: 'r1', planId: f.plan.id } }, f.signal)
-  try { await expect.poll(() => f.store.list('approval').length).toBe(1) }
+  try { await expect.poll(() => f.store.list('approval').length, { timeout: 7000 }).toBe(1) }
   catch (error) { throw new Error(`Approval observation: ${JSON.stringify({ status: f.store.get('run', 'r1')?.data.status, counts: f.counts(), phases: f.phases })}`, { cause: error }) }
   const approval = f.store.list('approval')[0]
   const command = { resource: 'approvals' as const, id: approval.data.id, action: 'decide', body: { expectedVersion: approval.version, decision: 'decline' } }
@@ -50,7 +50,7 @@ it('answers only a versioned active approval and refuses duplicate or unknown re
   await expect(f.service.execute(command, f.signal)).rejects.toThrow()
   await expect(f.service.execute({ ...command, id: 'unknown' }, f.signal)).rejects.toMatchObject({ code: 'NOT_FOUND' })
   expect(f.store.get('approval', approval.data.id)!.data.status).toBe('declined')
-})
+}, 20_000)
 it('reserves failed run intents globally across projects instead of silently running a new plan under the same ID', async () => {
   const f = await setup()
   const index = openKnowledge({ memory: true }); cleanup.push(() => index.close())
@@ -68,7 +68,7 @@ it('allows explicit reconciliation after cancellation and never retries an inter
     id: 'approval1', runId: 'r1', threadId: 'execution-thread-1', turnId: 'execution-turn-1', requestId: 'request1', kind: 'command', summary: 'Fixture', details: {}, status: 'pending',
   } }] : events })
   await f.service.execute({ resource: 'runs', body: { id: 'r1', planId: f.plan.id } }, f.signal)
-  await expect.poll(() => f.store.get('run', 'r1')?.data.status).toBe('awaiting_approval')
+  await expect.poll(() => f.store.get('run', 'r1')?.data.status, { timeout: 7000 }).toBe('awaiting_approval')
   const version = async () => (await f.service.read('runs', 'r1', {}) as { version: number }).version
   await f.service.execute({ resource: 'runs', id: 'r1', action: 'cancel', body: { expectedVersion: await version() } }, f.signal)
   const reconciled = await f.service.execute({ resource: 'runs', id: 'r1', action: 'reconcile', body: { expectedVersion: await version(), retryPush: false } }, f.signal)

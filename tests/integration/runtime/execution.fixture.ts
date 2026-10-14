@@ -7,11 +7,16 @@ import { createTask, type HostAdapter, type HostEvent, type HostTurnInput } from
 import { ExecutionService, approvePolicy, createWorkspace, inspectRepository, preparePolicy, type ExecutionHostRequest, type CheckSandbox } from '@ioteams/runtime'
 import { sha256 } from '../../../packages/runtime/src/policy.js'
 import { FixtureLifetime, fixtureExecFile, git, repository } from '../../fixtures/runtime/repository.js'
+let fixtureNumber = 0
 // Register teardown before awaiting setup, including setup that never returns
 // to its test after a Vitest timeout. The context signal is Vitest's public API.
 export function testFixtureLifetime(signal?: AbortSignal) {
   const test = getCurrentTest<Test | undefined>()
-  const lifetime = new FixtureLifetime(signal ?? test?.context.signal)
+  const id = ++fixtureNumber
+  const observer = process.env.IOTEAMS_FIXTURE_TIMINGS === '1' ? (phase: string, ms: number, outcome: string) => {
+    console.error('[fixture-timing]', JSON.stringify({ pid: process.pid, id, test: test?.name, phase, ms: Math.round(ms), outcome }))
+  } : undefined
+  const lifetime = new FixtureLifetime(signal ?? test?.context.signal, observer)
   test?.context.onTestFinished(() => lifetime.cleanup())
   return lifetime
 }
@@ -24,16 +29,16 @@ export class FixtureExecutionService extends ExecutionService {
   override start(...args: Parameters<ExecutionService['start']>) {
     this.lifetime.assertActive()
     args[3] = args[3] ? AbortSignal.any([args[3], this.lifetime.signal]) : this.lifetime.signal
-    return this.lifetime.run(() => super.start(...args))
+    return this.lifetime.run(() => super.start(...args), 'start')
   }
   override resume(...args: Parameters<ExecutionService['resume']>) {
     this.lifetime.assertActive()
     args[3] = args[3] ? AbortSignal.any([args[3], this.lifetime.signal]) : this.lifetime.signal
-    return this.lifetime.run(() => super.resume(...args))
+    return this.lifetime.run(() => super.resume(...args), 'resume')
   }
   override reconcile(...args: Parameters<ExecutionService['reconcile']>) {
     this.lifetime.assertActive()
-    return this.lifetime.run(() => super.reconcile(...args))
+    return this.lifetime.run(() => super.reconcile(...args), 'reconcile')
   }
 }
 export function executionFixture(options: { signal?: AbortSignal; implement?: (request: ExecutionHostRequest, input: HostTurnInput, count: number) => Promise<void>; review?: (value: Record<string, unknown>, count: number) => unknown; events?: (events: HostEvent[], phase: string) => HostEvent[]; check?: string; tasks?: number; corpusRoots?: string[] } = {}) {
@@ -117,6 +122,6 @@ export function executionFixture(options: { signal?: AbortSignal; implement?: (r
     return { ...f, lifetime, policy, workspace, store, operations, inputs, phases, disposed, createHost, createCheckSandbox,
       counts: () => ({ implementations, reviews, checks }),
       cleanup: () => lifetime.cleanup() }
-  })
+  }, 'setup')
   return Object.assign(creating, { cleanup: () => lifetime.cleanup(), lifetime })
 }

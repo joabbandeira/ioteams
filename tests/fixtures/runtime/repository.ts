@@ -14,27 +14,36 @@ export class FixtureLifetime {
   private readonly pending = new Set<Promise<unknown>>()
   private readonly releases: Array<() => Promise<void> | void> = []
   private cleaning?: Promise<void>
-  constructor(signal?: AbortSignal) {
+  constructor(signal?: AbortSignal, private readonly observe?: (phase: string, ms: number, outcome: string) => void) {
     this.signal = signal ? AbortSignal.any([signal, this.controller.signal]) : this.controller.signal
   }
   assertActive() { this.signal.throwIfAborted() }
-  run<T>(operation: () => Promise<T>): Promise<T> {
+  run<T>(operation: () => Promise<T>, phase?: string): Promise<T> {
+    const started = performance.now()
     const result = fixtureContext.run(this, async () => operation())
     this.pending.add(result)
-    void result.then(() => this.pending.delete(result), () => this.pending.delete(result))
+    const settled = (outcome: string) => {
+      this.pending.delete(result)
+      if (phase) this.observe?.(phase, performance.now() - started, outcome)
+    }
+    void result.then(() => settled('fulfilled'), () => settled('rejected'))
     return result
   }
   defer(release: () => Promise<void> | void) { this.releases.push(release) }
   async drain() {
+    const started = performance.now()
     this.controller.abort()
     // An in-flight setup/operation may still acquire a child before observing
     // cancellation. Drain to a fixed point, then release in reverse order.
     while (this.pending.size) await Promise.allSettled([...this.pending])
+    this.observe?.('drain', performance.now() - started, 'fulfilled')
   }
   cleanup(): Promise<void> {
     return this.cleaning ??= (async () => {
       await this.drain()
+      const started = performance.now()
       for (const release of this.releases.reverse()) await release()
+      this.observe?.('release', performance.now() - started, 'fulfilled')
     })()
   }
 }
