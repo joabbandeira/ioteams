@@ -1,0 +1,40 @@
+import { expect, it, vi } from 'vitest'
+import { createPanelClient, type PanelTransport } from '../../../painel/src/services/client.js'
+it('keeps session credentials in memory and validates strict control payloads before fetch', async () => {
+  const transport = vi.fn<PanelTransport>(async () => new Response(JSON.stringify({ csrfToken: 'private-csrf' }), { status: 200 }))
+  const client = createPanelClient(transport)
+  await client.session()
+  await expect(client.request('POST', '/api/v1/projects', { id: 'p1', name: 'Project', repositoryPath: '/fixture', authority: true })).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+  expect(transport).toHaveBeenCalledTimes(1)
+  transport.mockImplementationOnce(async (_url, options) => {
+    expect(options.credentials).toBe('same-origin')
+    expect(options.headers['x-csrf-token']).toBe('private-csrf')
+    expect(options.headers['idempotency-key']).toBeTruthy()
+    return new Response(JSON.stringify({ version: 1, data: { id: 'p1', name: 'Project', repositoryPath: '/fixture' } }))
+  })
+  expect(await client.request('POST', '/api/v1/projects', { id: 'p1', name: 'Project', repositoryPath: '/fixture' })).toMatchObject({ data: { id: 'p1' } })
+})
+it('rejects unsafe targets and refuses a mutation with uncertain network outcome without retry', async () => {
+  const transport = vi.fn<PanelTransport>(async () => new Response(JSON.stringify({ csrfToken: 'csrf' })))
+  const client = createPanelClient(transport); await client.session()
+  await expect(client.request('GET', 'https://evil.test/api/v1/projects')).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+  transport.mockRejectedValueOnce(Error('network'))
+  await expect(client.request('POST', '/api/v1/demands', { id: 'd1', projectId: 'p1', goal: 'Goal' })).rejects.toMatchObject({ code: 'OUTCOME_UNCERTAIN' })
+  expect(transport).toHaveBeenCalledTimes(2)
+})
+it('rejects malformed server records and clears the in-memory CSRF state after session expiry', async () => {
+  const transport = vi.fn<PanelTransport>(async () => new Response(JSON.stringify({ csrfToken: 'csrf' })))
+  const client = createPanelClient(transport); await client.session()
+  transport.mockResolvedValueOnce(new Response(JSON.stringify([{ version: 1, data: { id: 'p1', name: 'P', repositoryPath: '/x', secret: true } }])))
+  await expect(client.request('GET', '/api/v1/projects')).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
+  transport.mockResolvedValueOnce(new Response(JSON.stringify({ error: 'UNAUTHENTICATED' }), { status: 401 }))
+  await expect(client.request('GET', '/api/v1/projects')).rejects.toMatchObject({ code: 'UNAUTHENTICATED' })
+  await expect(client.request('POST', '/api/v1/demands', { id: 'd1', projectId: 'p1', goal: 'Goal' })).rejects.toMatchObject({ code: 'UNAUTHENTICATED' })
+  expect(transport).toHaveBeenCalledTimes(3)
+})
+it('bundles the shared API contracts for the browser without loading operational Node modules', async () => {
+  const { build } = await import('esbuild')
+  const result = await build({ stdin: { contents: "export * from '@ioteams/server/contracts'", resolveDir: process.cwd(), loader: 'ts' }, bundle: true, write: false, platform: 'browser', metafile: true })
+  expect(result.outputFiles[0].text).not.toMatch(/node:(sqlite|fs|child_process)/)
+  expect(Object.keys(result.metafile!.inputs).some(path => /(?:storage\/src\/database|knowledge\/src\/knowledge|runtime\/src\/execution)\.ts$/.test(path))).toBe(false)
+})

@@ -13,6 +13,7 @@ const json = (value: unknown) => z.json().parse(JSON.parse(JSON.stringify(value)
 interface Outcome { status: number; body: JsonValue }
 interface Session { cookie: string; csrf: string; expires: number }
 export interface ServerOptions {
+  panelHtml?: string
   store: Store; services: ApiServices; port?: number; pollMs?: number; heartbeatMs?: number; sessionTtlMs?: number; bootstrapTtlMs?: number
 }
 function safeFailure(error: unknown): Outcome {
@@ -50,15 +51,19 @@ export function createLocalServer(options: ServerOptions) {
     heartbeatMs: z.number().int().min(10).max(60_000), sessionTtlMs: z.number().int().min(50).max(86_400_000),
     bootstrapTtlMs: z.number().int().min(50).max(300_000) }).parse({ port: options.port ?? 0, pollMs: options.pollMs ?? 250,
       heartbeatMs: options.heartbeatMs ?? 15_000, sessionTtlMs: options.sessionTtlMs ?? 28_800_000, bootstrapTtlMs: options.bootstrapTtlMs ?? 120_000 })
-  const bootstrapSecret = token(), bootstrapExpires = Date.now() + settings.bootstrapTtlMs
-  let bootstrapUsed = false, session: Session | undefined, origin = '', closing = false, started = false
+  const bootstrapSecret = token(), browserBootstrapSecret = token(), bootstrapExpires = Date.now() + settings.bootstrapTtlMs
+  let bootstrapUsed = false, browserBootstrapUsed = false, session: Session | undefined, origin = '', closing = false, started = false
+  const sessions = new Map<string, Session>()
+  const panel = options.panelHtml
+  const scriptHashes = [...(panel ?? '').matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match => `'sha256-${createHash('sha256').update(match[1]).digest('base64')}'`).join(' ')
   let shutdown: Promise<void> | undefined
   const lifetime = new AbortController(), streams = new Set<ServerResponse>(), active = new Map<string, Promise<Outcome>>()
   const requests = new Set<Promise<void>>()
   function authenticate(req: IncomingMessage): Session {
     const cookies = (req.headers.cookie ?? '').split(';').map(c => c.trim()).filter(c => c.startsWith('ioteams_session='))
-    if (!session || Date.now() >= session.expires || cookies.length !== 1 || !same(cookies[0].slice(16), session.cookie)) throw new ApiError(401, 'UNAUTHENTICATED')
-    return session
+    const current = cookies.length === 1 ? sessions.get(cookies[0].slice(16)) : undefined
+    if (!current || Date.now() >= current.expires) throw new ApiError(401, 'UNAUTHENTICATED')
+    return current
   }
   async function command(key: string, input: JsonValue, work: () => Promise<unknown>): Promise<Outcome> {
     const existed = store.getReceipt(`api:${key}`)
@@ -117,17 +122,25 @@ export function createLocalServer(options: ServerOptions) {
     res.setHeader('content-security-policy', "default-src 'none'; frame-ancestors 'none'")
     if (closing || req.socket.localAddress !== '127.0.0.1' || req.headers.host !== origin.slice(7)) throw new ApiError(403, 'INVALID_HOST')
     if (req.headers.origin !== undefined && req.headers.origin !== origin || ['cross-site', 'same-site'].includes(String(req.headers['sec-fetch-site']))) throw new ApiError(403, 'INVALID_ORIGIN')
+    if (['/', '/index.html', '/demo'].includes(req.url ?? '') && ['GET', 'HEAD'].includes(req.method ?? '')) {
+      if (!panel) throw new ApiError(503, 'PANEL_BUILD_REQUIRED')
+      res.setHeader('content-security-policy', `default-src 'none'; script-src ${scriptHashes}; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`)
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end(req.method === 'HEAD' ? undefined : panel); return
+    }
     if (!req.url?.startsWith('/api/v1/') || req.url.includes('\\')) throw new ApiError(403, 'INVALID_TARGET')
     const url = new URL(req.url, origin)
     if (url.origin !== origin) throw new ApiError(403, 'INVALID_TARGET')
     if (!url.pathname.startsWith('/api/v1/') || url.hash || url.username || url.password) throw new ApiError(404, 'NOT_FOUND')
     const method = req.method ?? '', mutation = !['GET', 'HEAD'].includes(method)
     if (mutation && req.headers.origin !== origin) throw new ApiError(403, 'INVALID_ORIGIN')
-    if (url.pathname === '/api/v1/session/bootstrap' && method === 'POST') {
+    if (['/api/v1/session/bootstrap', '/api/v1/session/browser'].includes(url.pathname) && method === 'POST') {
       if (url.search) throw new ApiError(400, 'INVALID_REQUEST')
       const input = z.strictObject({ secret: z.string().max(128) }).parse(await body(req))
-      if (bootstrapUsed || Date.now() >= bootstrapExpires || !same(input.secret, bootstrapSecret)) throw new ApiError(401, 'UNAUTHENTICATED')
-      bootstrapUsed = true; session = { cookie: token(), csrf: token(), expires: Date.now() + settings.sessionTtlMs }
+      const browser = url.pathname.endsWith('/browser')
+      if (Date.now() >= bootstrapExpires || (browser ? !bootstrapUsed || browserBootstrapUsed || !same(input.secret, browserBootstrapSecret) : bootstrapUsed || !same(input.secret, bootstrapSecret))) throw new ApiError(401, 'UNAUTHENTICATED')
+      if (browser) browserBootstrapUsed = true; else bootstrapUsed = true
+      session = { cookie: token(), csrf: token(), expires: Date.now() + settings.sessionTtlMs }
+      sessions.set(session.cookie, session)
       res.setHeader('set-cookie', `ioteams_session=${session.cookie}; HttpOnly; SameSite=Strict; Path=/api/v1; Max-Age=${Math.floor(settings.sessionTtlMs / 1000)}`)
       return send(res, { status: 200, body: { csrfToken: session.csrf } })
     }
@@ -169,7 +182,7 @@ export function createLocalServer(options: ServerOptions) {
   })
   server.requestTimeout = 15_000; server.headersTimeout = 10_000; server.maxHeadersCount = 64
   return {
-    bootstrapSecret,
+    bootstrapSecret, browserBootstrapSecret,
     async listen(): Promise<string> {
       if (started || closing) throw new ApiError(409, 'SERVER_LIFECYCLE')
       started = true

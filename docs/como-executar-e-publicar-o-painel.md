@@ -1,6 +1,31 @@
-# Como executar e publicar o painel LISA
+# Como executar e publicar o painel ioteams
 
-O painel é um site estático. O arquivo `docs/index.html` contém o JavaScript e o CSS necessários à interface, incluindo o modo escuro. Não exige servidor de aplicação, banco de dados, chaves de API ou serviços de IA.
+O painel tem duas superfícies: operação local autenticada e demonstração fictícia. O build padrão gera `painel/dist/index.html` para o servidor local. O arquivo publicado `docs/index.html` é somente o demo, com CSS/JavaScript incorporados; abrir esse arquivo não executa agentes nem acessa dados operacionais.
+
+## Painel operacional local
+
+Use Node.js 24 e npm 11, instale pelo lockfile raiz e compile:
+
+```bash
+npm ci
+npm run build
+```
+
+Prepare o diretório privado do produto, índice e bindings de políticas revisadas conforme [Operação da CLI](operacao-cli.md). Inicie o proprietário único:
+
+```bash
+npm run cli -- serve --home /caminho/privado/ioteams --input /caminho/privado/serve.json --json
+```
+
+O terminal informa somente a origem loopback. Abra `browser-access.html` dentro desse diretório privado do produto. O arquivo tem modo 0600: use o link para abrir o painel, copie o código e cole no campo **Código de acesso privado**. A troca exige interação no mesmo origin, tem uso único e expira em até dois minutos após iniciar o servidor. O código não aparece em URL, stdout ou localStorage. A sessão do browser é independente da CLI, com cookie HttpOnly/SameSite e CSRF mantido apenas em memória. Se o código expirar, encerre com Ctrl+C, aguarde a liberação dos recursos e reinicie de forma segura. Não apague locks ou arquivos incertos para forçar um novo proprietário.
+
+**Trabalho** lê equipe, sprints e tarefas reais. **Conhecimento** consulta o catálogo e índice local, com citações, linhas, hashes e revisão Git. **Configuração** mostra os bindings confiáveis antes de editar objetivo/requisitos. Repositório, projeto, equipe, slots, branch, remote, checks e escopo são somente leitura e exigem nova revisão na CLI para mudança. Sem binding, a UI informa a lacuna em vez de inventar IDs. A leitura desses limites não cria workspace.
+
+Salve a demanda, declare competências por slot e use **Propor plano**. Os requisitos permanecem locais até essa ação. A demanda fica imutável após a tentativa, inclusive quando há lacunas; para mudar requisitos, crie outro binding/demanda pela CLI. Revise Product Goal, Product Backlog, Sprint Goal, Sprint Backlog, DoD, tarefas, checks e fontes. **Aprovar este hash** vincula o snapshot exato; **Iniciar execução** é uma ação separada e mantém aprovações nativas. **Execuções** mostra estados e solicitações concretas. Registros completos dos eventos Scrum ainda não são expostos pela API; metadata SSE não é apresentada como conteúdo desses eventos.
+
+Falha de rede preserva os campos e permite reconectar leituras. Uma mutação de resultado incerto não é repetida automaticamente: reconcilie pela CLI antes de reenviar. SSE atualiza registros e retoma o cursor; reconexão revalida os dados. Navegação por teclado, temas e viewport estreita usam os mesmos componentes do demo.
+
+A rota `/demo` no servidor local monta somente a simulação, sem cliente operacional. Ela não oferece desfazer, reiniciar ou editar efeitos reais. As opções de hospedagem abaixo se referem exclusivamente ao HTML fictício publicado.
 
 ## Obter os arquivos
 
@@ -62,9 +87,9 @@ npm run build
 npm run preview
 ```
 
-O lockfile raiz fixa a instalação de todos os workspaces (`packages/*`, `apps/*` e `painel`). `typecheck` valida os pacotes e o painel; `test` executa os testes unitários e de integração presentes. `docs:check` verifica links locais e a estrutura/relações das entidades declaradas; catálogo vazio é válido nesta etapa da implementação.
+O lockfile raiz fixa a instalação de todos os workspaces (`packages/*`, `apps/*` e `painel`). `typecheck` valida os pacotes e o painel; `test` executa os testes unitários e de integração presentes. `docs:check` verifica links locais e a estrutura/relações das entidades declaradas; catálogo e relações são validados pelos mesmos schemas compartilhados.
 
-O build padrão gera `painel/dist/index.html`, ignorado pelo Git, e `preview` o serve em `http://127.0.0.1:3000/`. Edite [painel/src/app.tsx](../painel/src/app.tsx) para a interface, [painel/src/model.ts](../painel/src/model.ts) para o cenário fictício e [painel/src/styles.css](../painel/src/styles.css) para os estilos. Recompile e recarregue o navegador depois de cada alteração; o servidor não recompila automaticamente.
+O build padrão gera `painel/dist/index.html`, ignorado pelo Git. `preview` serve somente os bytes da interface em `http://127.0.0.1:3000/`; para operar com API autenticada, use `serve` conforme acima. Edite [painel/src/panel.tsx](../painel/src/panel.tsx) e suas vistas para a operação, [painel/src/demo.tsx](../painel/src/demo.tsx) para o demo, [painel/src/model.ts](../painel/src/model.ts) para o cenário fictício e [painel/src/styles.css](../painel/src/styles.css) para os estilos. Recompile e recarregue o navegador depois de cada alteração; o servidor não recompila automaticamente.
 
 Também é possível rodar `npm ci` dentro de `painel/`; o npm usa o lockfile do workspace raiz. Os comandos de build/typecheck/preview nesse diretório atuam apenas no painel. O comando `npm start` mantém a prévia do HTML aprovado em `docs/index.html`.
 
@@ -75,7 +100,7 @@ npm run browser:install
 npm run test:e2e
 ```
 
-O E2E usa sua própria prévia na porta 4173 e cobre abertura de tarefa, critérios DONE e reprovação/replanejamento. Requer espaço para Chromium (a instalação completa inicial é estimada em menos de 2 GB adicionais); mantenha pelo menos 5 GB de reserva. `npm ci` reinstala `node_modules`, portanto execute novamente `browser:install` após uma reinstalação. Os comandos `test:unit` e `test:integration` permitem rodar subconjuntos; diretório vazio termina com código 2 e informa indisponibilidade.
+O E2E usa API real com SQLite/índice e hosts simulados na porta 4173; cobre sessão, catálogo, configuração, fontes, proposta/aprovação por hash, teclado, tema, narrow viewport, falhas e o demo. Não faz login nem inferência nativa. Requer espaço para Chromium (a instalação completa inicial é estimada em menos de 2 GB adicionais); mantenha pelo menos 5 GB de reserva. `npm ci` reinstala `node_modules`, portanto execute novamente `browser:install` após uma reinstalação. Os comandos `test:unit` e `test:integration` permitem rodar subconjuntos; diretório vazio termina com código 2 e informa indisponibilidade.
 
 Para atualizar deliberadamente o HTML destinado à publicação:
 

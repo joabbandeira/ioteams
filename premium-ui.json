@@ -1,0 +1,17 @@
+{
+  "profile": "product-admin",
+  "sourceRoots": ["painel/src"],
+  "locale": "pt-BR",
+  "canonicalMap": "UX-CONTRACT.md",
+  "requiredCapabilities": ["Select/Listbox", "Form", "Scrollbar", "Toast", "CRUD"],
+  "ownership": { "Select/Listbox": "authored" },
+  "requiredCommands": ["typecheck", "unit", "e2e", "docs", "build"],
+  "commands": {
+    "typecheck": "npm run typecheck",
+    "unit": "npm test",
+    "e2e": "npm run test:e2e",
+    "docs": "npm run docs:check",
+    "build": "npm run build"
+  },
+  "evidence": { "crudFullFlow": "tests/e2e/panel.spec.ts", "failurePaths": "tests/e2e/panel.spec.ts" }
+}

@@ -1,6 +1,6 @@
 import { resolve } from 'node:path'
 import { readMarkdown } from '@ioteams/catalog'
-import { CatalogKindSchema, GitShaSchema, KnowledgeCitationSchema, SlugSchema, type KnowledgeCitation } from '@ioteams/core'
+import { GitShaSchema, KnowledgeCitationSchema, type KnowledgeCitation } from '@ioteams/core'
 import { z } from 'zod'
 import { connection, type KnowledgeIndex } from './database.js'
 import { lexicalQuery } from './query.js'
@@ -9,15 +9,9 @@ import { readSnapshot, sha256, verifySourceContext } from './source.js'
 export const IndexCatalogOptionsSchema = z.strictObject({ root: z.string().min(1), commitSha: GitShaSchema })
 export type IndexCatalogOptions = z.infer<typeof IndexCatalogOptionsSchema>
 export interface IndexCatalogResult { added: number; updated: number; deleted: number; unchanged: number; documents: number; commitSha: string }
-export const SearchKnowledgeOptionsSchema = z.strictObject({
-  query: z.string().max(2048), topK: z.number().int().min(1).max(50).default(8),
-  maxContextChars: z.number().int().min(1).max(100_000).default(16_000),
-  filters: z.strictObject({ kind: CatalogKindSchema.optional(), entityId: SlugSchema.optional(),
-    professionId: SlugSchema.optional(), stackId: SlugSchema.optional(),
-    professionalId: SlugSchema.optional(), teamId: SlugSchema.optional(),
-  }).default({}),
-})
-export type SearchKnowledgeOptions = z.input<typeof SearchKnowledgeOptionsSchema>
+export { SearchKnowledgeOptionsSchema } from './contracts.js'
+export type { SearchKnowledgeOptions } from './contracts.js'
+import { SearchKnowledgeOptionsSchema, type SearchKnowledgeOptions } from './contracts.js'
 export interface KnowledgeSearchResult {
   status: 'evidence' | 'no_evidence'
   reason?: 'empty_index' | 'empty_query' | 'no_matches' | 'stale_sources' | 'context_limit'

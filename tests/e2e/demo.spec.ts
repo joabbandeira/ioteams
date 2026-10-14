@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test'
 test('LISA abre tarefa e só conclui com todos os critérios DONE', async ({ page }) => {
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
-  await page.goto('/')
+  await page.goto('/demo')
   await expect(page.getByRole('heading', { name: 'Time LISA' })).toBeVisible()
   await page.getByRole('button', { name: 'Abrir LISA-106:', exact: false }).click()
   const dialog = page.getByRole('dialog')
@@ -24,7 +24,7 @@ test('LISA abre tarefa e só conclui com todos os critérios DONE', async ({ pag
 })
 
 test('reprovação exige motivo e replanejamento preserva ID/histórico e limpa critérios', async ({ page }) => {
-  await page.goto('/')
+  await page.goto('/demo')
   await page.getByRole('button', { name: 'Abrir LISA-106:', exact: false }).click()
   const dialog = page.getByRole('dialog')
   for (const checkbox of await dialog.getByRole('checkbox').all()) await checkbox.check()

@@ -1,9 +1,21 @@
 {
-  "name": "@ioteams/runtime", "version": "0.1.0", "private": true, "type": "module",
-  "exports": { ".": "./src/index.ts" },
-  "scripts": { "typecheck": "tsc --noEmit -p tsconfig.json", "build": "npm run typecheck" },
+  "name": "@ioteams/runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./planning-contracts": "./src/planning-contracts.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "npm run typecheck"
+  },
   "dependencies": {
-    "@ioteams/catalog": "0.1.0", "@ioteams/core": "0.1.0", "@ioteams/knowledge": "0.1.0",
-    "@ioteams/storage": "0.1.0", "zod": "4.6.7"
+    "@ioteams/catalog": "0.1.0",
+    "@ioteams/core": "0.1.0",
+    "@ioteams/knowledge": "0.1.0",
+    "@ioteams/storage": "0.1.0",
+    "zod": "4.6.7"
   }
 }

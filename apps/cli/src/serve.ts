@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
 import { ContentHashSchema,IdentifierSchema } from '@ioteams/core'
@@ -45,6 +46,7 @@ export async function serve(home:string,file:string,signal:AbortSignal|undefined
     const planning=new PlanningService({store,index,catalogRoot:config.catalogRoot,createHost:factories.createHost})
     const execution=new ExecutionService({store,createHost:factories.createHost,createCheckSandbox:factories.createCheckSandbox})
     const services=createDomainServices({store,index,catalogRoot:config.catalogRoot,planning,execution,policyDirectory:join(home,'policies'),
+      planningBindings: () => [...policies].map(([demandId, policy]) => ({ demandId, repositoryPath: policy.snapshot.repository.root, plan: policy.snapshot.plan })),
       async planningPolicy(id){const policy=policies.get(id);if(!policy)fail('POLICY_BINDING_REQUIRED',4);await workspaceFor(policy);return policy},
       async executionContext(planId){
         const record=store.get('approvedPlan',planId);if(!record)fail('APPROVED_PLAN_REQUIRED',4)
@@ -55,7 +57,10 @@ export async function serve(home:string,file:string,signal:AbortSignal|undefined
         return {policy,workspace}
       },
     })
-    return {options:{store,services,port:input.port},async dispose(){
+    let panelHtml: string | undefined
+    try { panelHtml = await readFile(new URL('../../../painel/dist/index.html', import.meta.url), 'utf8') }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    return {options:{store,services,port:input.port,panelHtml},async dispose(){
       const errors:unknown[]=[]
       for(const entry of workspaces.values()){
         const result=await Promise.allSettled([entry.pending])

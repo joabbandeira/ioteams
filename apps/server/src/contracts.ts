@@ -1,13 +1,14 @@
 import { z } from 'zod'
 import { ApprovalDecisionSchema, CatalogMetadataSchema, ContentHashSchema, CreateTaskSchema,
   IdentifierSchema, KnowledgeCitationSchema, RunStatusSchema, TaskTransitionSchema, ProductBacklogSchema, SprintBacklogSchema, DefinitionOfDoneSchema } from '@ioteams/core'
-import { EntitySchemas } from '@ioteams/storage'
-import { PlanningDemandSchema, PlanningRoleRecordSchema, CompetencyGapSchema } from '@ioteams/runtime'
-import { SearchKnowledgeOptionsSchema } from '@ioteams/knowledge'
+import { EntitySchemas } from '@ioteams/storage/entities'
+import { PlanningDemandSchema, PlanningRoleRecordSchema, CompetencyGapSchema } from '@ioteams/runtime/planning-contracts'
+import { SearchKnowledgeOptionsSchema } from '@ioteams/knowledge/contracts'
 
 export class ApiError extends Error {
   constructor(readonly status: number, readonly code: string) { super(code) }
 }
+export const CatalogResponseSchema = z.array(z.strictObject({ metadata: CatalogMetadataSchema, path: z.string().max(1024) })).max(10_000)
 export const VersionSchema = z.number().int().positive().max(Number.MAX_SAFE_INTEGER - 1)
 const empty = z.strictObject({})
 const record = <T extends z.ZodType>(schema: T) => z.strictObject({ version: VersionSchema, data: schema })
@@ -15,7 +16,9 @@ export const records = {
   projects: record(EntitySchemas.project), demands: record(EntitySchemas.demand), plans: record(EntitySchemas.approvedPlan),
   sprints: record(EntitySchemas.sprint), tasks: record(EntitySchemas.task), runs: record(EntitySchemas.run), approvals: record(EntitySchemas.approval),
 }
-export type Resource = keyof typeof records | 'catalog' | 'knowledge' | 'proposals' | 'planningStatus' | 'runStatus'
+export const TrustedBindingSchema = z.strictObject({ demandId: IdentifierSchema, repositoryPath: records.projects.shape.data.shape.repositoryPath, plan: EntitySchemas.approvedPlan.shape.plan })
+export type TrustedBinding = z.infer<typeof TrustedBindingSchema>
+export type Resource = keyof typeof records | 'catalog' | 'knowledge' | 'proposals' | 'planningStatus' | 'runStatus' | 'bindings'
 export interface ApiCommand { resource: Resource; id?: string; action?: string; body: unknown }
 export interface ApiServices {
   read(resource: Resource, id: string | undefined, query: Record<string, string>): Promise<unknown>
@@ -36,7 +39,7 @@ export const TaskControlSchema = z.strictObject({ expectedVersion: VersionSchema
 export const PlanRequestSchema = z.strictObject({ expectedVersion: VersionSchema,
   teamId: PlanningDemandSchema.shape.teamId, requirements: PlanningDemandSchema.shape.requirements })
 export const PlanApprovalSchema = z.strictObject({ expectedVersion: VersionSchema, reviewedHash: ContentHashSchema })
-const SearchResponse = z.strictObject({ status: z.enum(['evidence', 'no_evidence']),
+export const SearchResponseSchema = z.strictObject({ status: z.enum(['evidence', 'no_evidence']),
   reason: z.enum(['empty_index', 'empty_query', 'no_matches', 'stale_sources', 'context_limit']).optional(),
   citations: z.array(KnowledgeCitationSchema).max(50) })
 // Proposals contain a complex runtime snapshot. The service returns typed review artifacts;
@@ -63,10 +66,12 @@ export function resolveRoute(method: string, path: string): Route {
   const [resource, id, action] = parts
   if (parts.length > 3 || parts.some(p => !p)) throw new ApiError(404, 'NOT_FOUND')
   if (id) IdentifierSchema.parse(id)
+  if (method === 'GET' && resource === 'bindings' && !id)
+    return { resource, input: empty, query: empty, output: z.array(TrustedBindingSchema).max(100) }
   if (method === 'GET' && resource === 'catalog' && !id)
-    return { resource, input: empty, query: empty, output: z.array(z.strictObject({ metadata: CatalogMetadataSchema, path: z.string().max(1024) })).max(10_000) }
+    return { resource, input: empty, query: empty, output: CatalogResponseSchema }
   if (resource === 'knowledge' && id === 'search' && method === 'POST' && !action)
-    return { resource, action: 'search', input: SearchKnowledgeOptionsSchema, query: empty, output: SearchResponse }
+    return { resource, action: 'search', input: SearchKnowledgeOptionsSchema, query: empty, output: SearchResponseSchema }
   if (method === 'GET' && resource === 'demands' && id && action === 'planning')
     return { resource: 'planningStatus', id, input: empty, query: empty, output: PlanningStatusSchema }
   if (method === 'GET' && resource === 'runs' && id && action === 'status')

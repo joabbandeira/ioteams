@@ -9,7 +9,10 @@ const root = fileURLToPath(new URL('.', import.meta.url))
 const dist = new URL('./dist/', import.meta.url)
 const args = process.argv.slice(2)
 if (args.some(arg => arg !== '--demo')) throw new Error('Uso: node build.mjs [--demo]')
-const output = new URL(args.includes('--demo') ? '../docs/index.html' : './dist/index.html', import.meta.url)
+const demo = args.includes('--demo')
+const title = demo ? 'LISA · Demonstração fictícia' : 'ioteams · Painel local'
+const description = demo ? 'Demonstração fictícia do time LISA: pessoas, cadência e entrega.' : 'ioteams: pessoas, conhecimento, planejamento e entrega local.'
+const output = new URL(demo ? '../docs/index.html' : './dist/index.html', import.meta.url)
 const require = createRequire(import.meta.url)
 const tailwind = join(dirname(require.resolve('@tailwindcss/cli/package.json')), 'dist/index.mjs')
 
@@ -29,12 +32,12 @@ const result = await build({
   format: 'iife',
   target: 'es2020',
   jsx: 'automatic',
-  define: { 'process.env.NODE_ENV': '"production"' },
+  define: { 'process.env.NODE_ENV': '"production"', __IOTEAMS_DEMO__: String(args.includes('--demo')) },
   legalComments: 'inline',
 })
 const css = await readFile(new URL('style.css', dist), 'utf8')
 const js = result.outputFiles[0].text.replaceAll('</script', '<\\/script')
-const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="description" content="Protótipo interativo do time LISA: pessoas, Scrum e entrega. Todos os dados são fictícios."><title>LISA · Pessoas, cadência e entrega</title><style>${css}</style></head><body><div id="root"></div><noscript>Ative JavaScript para explorar este protótipo interativo.</noscript><script>${js}</script></body></html>`
+const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="description" content="${description}"><title>${title}</title><style>${css}</style></head><body><div id="root"></div><noscript>Ative JavaScript para explorar este protótipo interativo.</noscript><script>${js}</script></body></html>`
 
 await writeFile(output, html)
 console.log(`HTML pronto: ${relative(root, fileURLToPath(output))} (${Buffer.byteLength(html)} bytes).`)

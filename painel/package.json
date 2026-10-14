@@ -20,7 +20,10 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "tailwind-merge": "^3.0.0",
-    "lucide-react": "^0.468.0"
+    "lucide-react": "^0.468.0",
+    "@ioteams/core": "0.1.0",
+    "@ioteams/server": "0.1.0",
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "esbuild": "^0.25.0",

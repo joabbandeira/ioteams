@@ -6,13 +6,14 @@ import { searchKnowledge, type KnowledgeIndex, type SearchKnowledgeOptions } fro
 import { ConflictError, canonicalJson, type Store, type EntityKind, type StoreEvent, type JsonValue, type EntityMap, type Versioned } from '@ioteams/storage'
 import { PlanningService, ExecutionService, type ApprovedPolicy, type Workspace, type PlanningProposal } from '@ioteams/runtime'
 import { ApiError, records, TaskCreateSchema, TaskControlSchema, PlanRequestSchema, PlanApprovalSchema,
-  ProposalResponseSchema, type ApiServices, type ApiCommand, type Resource } from './contracts.js'
+  ProposalResponseSchema, type ApiServices, type ApiCommand, type Resource, type TrustedBinding } from './contracts.js'
 
 export interface ExecutionContext { policy: ApprovedPolicy; workspace: Workspace }
 export interface DomainServiceOptions {
   store: Store; index: KnowledgeIndex; catalogRoot: string
   planning?: PlanningService; execution?: ExecutionService
   // These are trusted operator bindings, never policy paths or executable input from HTTP.
+  planningBindings?(): readonly TrustedBinding[]
   planningPolicy?(demandId: string): Promise<ApprovedPolicy>
   executionContext?(planId: string, runId: string, signal?: AbortSignal): Promise<ExecutionContext>
   policyDirectory?: string
@@ -154,6 +155,7 @@ export function createDomainServices(options: DomainServiceOptions): ApiServices
   return {
     async read(resource: Resource, id: string | undefined, query: Record<string, string>) {
       requireOpen()
+      if (resource === 'bindings') return options.planningBindings?.() ?? []
       if (resource === 'catalog') return loadCatalog(options.catalogRoot)
       if (resource === 'runStatus') {
         const run = store.get('run', id!), record = runRecord(id!)

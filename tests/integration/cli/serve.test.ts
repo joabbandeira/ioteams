@@ -1,6 +1,6 @@
 import {expect,it} from 'vitest'
 import {spawn} from 'node:child_process'
-import {mkdtemp,mkdir,readFile,realpath,rm,writeFile} from 'node:fs/promises'
+import {mkdtemp,mkdir,readFile,lstat,realpath,rm,writeFile} from 'node:fs/promises'
 import {join} from 'node:path'
 import {tmpdir} from 'node:os'
 import {initializeProduct} from '../../../apps/cli/src/index.js'
@@ -14,9 +14,18 @@ it('starts an executable loopback launcher, publishes a private channel and drai
   await expect.poll(()=>server.output(),{timeout:7000}).toContain('listening')
   const channel=JSON.parse(await readFile(join(home,'connection.json'),'utf8'))
   expect(server.output()).not.toContain(channel.cookie);expect(server.output()).not.toContain(channel.csrfToken)
+  const handoff=await readFile(join(home,'browser-access.html'),'utf8')
+  expect((await lstat(join(home,'browser-access.html'))).mode&0o077).toBe(0)
+  const secret=/value="([A-Za-z0-9_-]{43})"/.exec(handoff)![1]
+  expect(server.output()).not.toContain(secret)
+  const browser=await fetch(channel.origin+'/api/v1/session/browser',{method:'POST',headers:{origin:channel.origin,'content-type':'application/json'},body:JSON.stringify({secret})})
+  expect(browser.status).toBe(200)
+  const browserCookie=browser.headers.get('set-cookie')!.split(';')[0]
+  expect((await fetch(channel.origin+'/api/v1/bindings',{headers:{cookie:browserCookie}})).status).toBe(200)
   const list=await command(['status','--home',home,'--resource','projects','--json']).done;expect(list.code).toBe(0);expect(JSON.parse(list.stdout)).toEqual([])
   expect((await command(['serve','--home',home,'--input',config,'--json']).done).code).toBe(4)
   server.child.kill('SIGINT');expect((await server.done).code).toBe(0)
+  await expect(readFile(join(home,'browser-access.html'))).rejects.toMatchObject({code:'ENOENT'})
   await expect(readFile(join(home,'connection.json'))).rejects.toMatchObject({code:'ENOENT'})
   await expect(readFile(join(home,'.ioteams-product-owner.lock'))).rejects.toMatchObject({code:'ENOENT'})
  }finally{if(server.child.exitCode===null)server.child.kill('SIGTERM');await server.done;await rm(root,{recursive:true,force:true})}
