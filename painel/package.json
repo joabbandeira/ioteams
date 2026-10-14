@@ -4,13 +4,14 @@
   "version": "0.1.0",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=24 <25"
   },
   "scripts": {
     "build": "node build.mjs",
     "start": "node serve.mjs",
-    "preview": "node serve.mjs",
-    "typecheck": "tsc --noEmit"
+    "preview": "node ../scripts/preview.mjs",
+    "typecheck": "tsc --noEmit",
+    "build:demo": "node build.mjs --demo"
   },
   "dependencies": {
     "react": "^19.0.0",

@@ -1,0 +1,36 @@
+{
+  "name": "ioteams",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25",
+    "npm": ">=11 <12"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*",
+    "painel"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit && npm run typecheck --workspace painel",
+    "test": "node scripts/test.mjs",
+    "test:unit": "node scripts/test.mjs unit",
+    "test:integration": "node scripts/test.mjs integration",
+    "test:e2e": "playwright test",
+    "docs:check": "node --import tsx scripts/docs-check.ts",
+    "build": "npm run build --workspaces --if-present",
+    "build:demo": "npm run build:demo --workspace painel",
+    "preview": "node scripts/preview.mjs",
+    "browser:install": "PLAYWRIGHT_BROWSERS_PATH=0 playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.0",
+    "@types/node": "24.10.0",
+    "github-slugger": "2.0.0",
+    "marked": "18.1.1",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vitest": "3.2.7"
+  }
+}

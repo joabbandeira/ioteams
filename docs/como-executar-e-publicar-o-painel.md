@@ -25,7 +25,7 @@ Abra `http://127.0.0.1:3000/`. Use `Ctrl+C` no terminal para encerrar o servidor
 
 ## Opção 2: executar com Node.js
 
-Requer Node.js 22 ou superior, com npm. Na raiz do repositório:
+Requer Node.js 24, com npm 11. Na raiz do repositório:
 
 ```bash
 cd painel
@@ -51,18 +51,41 @@ Nesse caso, abra `http://127.0.0.1:3001/`. Use `Ctrl+C` para encerrar o servidor
 
 ## Alterar e recompilar
 
-Para trabalhar no código-fonte, execute em `painel/`:
+Para trabalhar no código-fonte, execute na raiz do repositório com Node.js 24 e npm 11:
 
 ```bash
 npm ci
 npm run typecheck
+npm test
+npm run docs:check
 npm run build
-npm start
+npm run preview
 ```
 
-`npm ci` instala as dependências nas versões resolvidas pelo lockfile e requer acesso ao registro de pacotes. `typecheck` verifica o TypeScript; `build` gera novamente `docs/index.html`.
+O lockfile raiz fixa a instalação de todos os workspaces (`packages/*`, `apps/*` e `painel`). `typecheck` valida os pacotes e o painel; `test` executa os testes unitários e de integração presentes. `docs:check` verifica links locais e a estrutura/relações das entidades declaradas; catálogo vazio é válido nesta etapa da implementação.
 
-Edite [painel/src/app.tsx](../painel/src/app.tsx) para a interface, [painel/src/model.ts](../painel/src/model.ts) para o cenário fictício e [painel/src/styles.css](../painel/src/styles.css) para os estilos. Após cada alteração, execute `npm run build` e recarregue a página. O servidor de pré-visualização não recompila automaticamente.
+O build padrão gera `painel/dist/index.html`, ignorado pelo Git, e `preview` o serve em `http://127.0.0.1:3000/`. Edite [painel/src/app.tsx](../painel/src/app.tsx) para a interface, [painel/src/model.ts](../painel/src/model.ts) para o cenário fictício e [painel/src/styles.css](../painel/src/styles.css) para os estilos. Recompile e recarregue o navegador depois de cada alteração; o servidor não recompila automaticamente.
+
+Também é possível rodar `npm ci` dentro de `painel/`; o npm usa o lockfile do workspace raiz. Os comandos de build/typecheck/preview nesse diretório atuam apenas no painel. O comando `npm start` mantém a prévia do HTML aprovado em `docs/index.html`.
+
+Para instalar o navegador dentro do projeto e executar os testes de interface:
+
+```bash
+npm run browser:install
+npm run test:e2e
+```
+
+O E2E usa sua própria prévia na porta 4173 e cobre abertura de tarefa, critérios DONE e reprovação/replanejamento. Requer espaço para Chromium (a instalação completa inicial é estimada em menos de 2 GB adicionais); mantenha pelo menos 5 GB de reserva. `npm ci` reinstala `node_modules`, portanto execute novamente `browser:install` após uma reinstalação. Os comandos `test:unit` e `test:integration` permitem rodar subconjuntos; diretório vazio termina com código 2 e informa indisponibilidade.
+
+Para atualizar deliberadamente o HTML destinado à publicação:
+
+```bash
+npm run build:demo
+```
+
+Revise o diff de `docs/index.html`. Esse comando também existe no workspace `painel`. Os builds e testes normais preservam o arquivo publicado.
+
+A CI é acionada somente por tags `ci/ioteams-v1-T06-*`, `ci/ioteams-v1-T09-*`, `ci/ioteams-v1-T13-*`, `ci/ioteams-v1-T17-*` e `ci/ioteams-v1-T18-*`. Pushes de branches não iniciam esse workflow. Ele roda os mesmos checks com Chromium e não usa credenciais de modelo, agentes reais ou deploy. A criação e a preservação das tags de marco são responsabilidade do coordenador da entrega.
 
 ## Publicar no GitHub Pages
 
@@ -76,7 +99,7 @@ O repositório já contém o HTML pronto em `docs/index.html` e o arquivo `docs/
 
 O procedimento segue a [documentação oficial de fontes de publicação do GitHub Pages](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site). A presença dos arquivos no repositório não habilita o Pages por si só.
 
-Para atualizar o painel hospedado, recompile em `painel/` e publique o novo `docs/index.html` na branch configurada. Alterações somente em `painel/src/` não atualizam o HTML publicado automaticamente.
+Para atualizar o painel hospedado, execute `npm run build:demo` e publique o novo `docs/index.html` na branch configurada. Alterações somente em `painel/src/` não atualizam o HTML publicado automaticamente.
 
 ## Outra hospedagem estática
 
@@ -85,8 +108,8 @@ Publique o arquivo `docs/index.html` como `index.html` na raiz pública do servi
 Se o serviço pedir um comando de compilação a partir da raiz do repositório, use:
 
 ```bash
-npm --prefix painel ci
-npm --prefix painel run build
+npm ci
+npm run build:demo
 ```
 
 O diretório de saída para publicação é `docs/`. Ele também contém os documentos conceituais e este guia; caso queira hospedar apenas a interface, publique somente o `index.html` gerado.
@@ -95,7 +118,7 @@ O diretório de saída para publicação é `docs/`. Ele também contém os docu
 
 Confirme que o painel abre, alterna entre os temas claro e escuro, exibe os detalhes das pessoas e eventos e permite movimentar tarefas. Ao recarregar a página, o cenário deve voltar aos dados iniciais.
 
-Se o site retornar 404, confira a branch e a pasta de publicação e o resultado da implantação. Se aparecer uma versão antiga, confira se o HTML foi recompilado e publicado. Para erros locais de instalação, verifique a versão do Node.js e se o comando foi executado em `painel/`.
+Se o site retornar 404, confira a branch e a pasta de publicação e o resultado da implantação. Se aparecer uma versão antiga, confira se o HTML foi recompilado e publicado. Para erros locais de instalação, verifique a versão do Node.js e se foi usado o lockfile da raiz do workspace.
 
 ## Limites do protótipo
 
