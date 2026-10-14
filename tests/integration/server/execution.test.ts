@@ -30,7 +30,7 @@ it.each(['pause', 'cancel'] as const)('binds %s to the active job, interrupts it
   } }] : events })
   await f.service.execute({ resource: 'runs', body: { id: 'r1', planId: f.plan.id } }, f.signal)
   await expect.poll(() => f.store.get('run', 'r1')?.data.status).toBe('awaiting_approval')
-  const current = f.store.get('run', 'r1')!
+  const current = await f.service.read('runs', 'r1', {}) as { version: number }
   await expect(f.service.execute({ resource: 'runs', id: 'r1', action, body: { expectedVersion: current.version - 1 } }, f.signal)).rejects.toThrow()
   const result = await f.service.execute({ resource: 'runs', id: 'r1', action, body: { expectedVersion: current.version } }, f.signal)
   expect(result).toEqual({ id: 'r1', status: action === 'pause' ? 'paused' : 'cancelled' })
@@ -68,11 +68,11 @@ it('allows explicit reconciliation after cancellation and never retries an inter
   } }] : events })
   await f.service.execute({ resource: 'runs', body: { id: 'r1', planId: f.plan.id } }, f.signal)
   await expect.poll(() => f.store.get('run', 'r1')?.data.status).toBe('awaiting_approval')
-  const version = () => f.store.get('run', 'r1')!.version
-  await f.service.execute({ resource: 'runs', id: 'r1', action: 'cancel', body: { expectedVersion: version() } }, f.signal)
-  const reconciled = await f.service.execute({ resource: 'runs', id: 'r1', action: 'reconcile', body: { expectedVersion: version(), retryPush: false } }, f.signal)
+  const version = async () => (await f.service.read('runs', 'r1', {}) as { version: number }).version
+  await f.service.execute({ resource: 'runs', id: 'r1', action: 'cancel', body: { expectedVersion: await version() } }, f.signal)
+  const reconciled = await f.service.execute({ resource: 'runs', id: 'r1', action: 'reconcile', body: { expectedVersion: await version(), retryPush: false } }, f.signal)
   expect(reconciled).toEqual({ id: 'r1', status: 'paused', reason: 'RECONCILIATION_REQUIRED' })
-  await f.service.execute({ resource: 'runs', id: 'r1', action: 'resume', body: { expectedVersion: version() } }, f.signal)
+  await f.service.execute({ resource: 'runs', id: 'r1', action: 'resume', body: { expectedVersion: await version() } }, f.signal)
   await expect.poll(() => f.store.eventsAfter(0).filter(e => e.type === 'api.job.finished').length).toBe(2)
   expect(await f.service.read('runStatus', 'r1', {})).toEqual({ id: 'r1', status: 'paused', reason: 'RECONCILIATION_REQUIRED' })
   expect(f.inputs).toHaveLength(1); expect(f.counts().checks).toBe(0)

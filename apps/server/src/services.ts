@@ -14,7 +14,7 @@ export interface DomainServiceOptions {
   planning?: PlanningService; execution?: ExecutionService
   // These are trusted operator bindings, never policy paths or executable input from HTTP.
   planningPolicy?(demandId: string): Promise<ApprovedPolicy>
-  executionContext?(planId: string, runId: string): Promise<ExecutionContext>
+  executionContext?(planId: string, runId: string, signal?: AbortSignal): Promise<ExecutionContext>
   policyDirectory?: string
 }
 const kinds = { projects: 'project', demands: 'demand', plans: 'approvedPlan', sprints: 'sprint', tasks: 'task', runs: 'run', approvals: 'approval' } as const
@@ -60,6 +60,37 @@ export function createDomainServices(options: DomainServiceOptions): ApiServices
     if (createHash('sha256').update(canonicalJson(json(body))).digest('hex') !== hash) throw new ApiError(409, 'PROPOSAL_MISMATCH')
     return value
   }
+  function runIntents(): Map<string, Versioned<EntityMap['run']>> {
+    const result = new Map<string, Versioned<EntityMap['run']>>()
+    for (const item of events(store)) if (item.type === 'api.run.intent') {
+      const record = records.runs.parse(item.data); result.set(record.data.id, record)
+    }
+    return result
+  }
+  function runRecord(id: string): Versioned<EntityMap['run']> | undefined {
+    const actual = store.get('run', id), intent = runIntents().get(id)
+    if (!intent) return actual
+    if (actual) {
+      if (actual.data.planId !== intent.data.planId || actual.data.projectId !== intent.data.projectId) throw new ApiError(409, 'RUN_MISMATCH')
+      const stopped = ['paused', 'cancelled'].includes(intent.data.status) && actual.data.status !== 'completed'
+      return records.runs.parse({ version: intent.version + actual.version, data: { ...actual.data, ...(stopped ? { status: intent.data.status } : {}) } })
+    }
+    return { ...intent, data: { ...intent.data, status: intent.data.status === 'queued' && !jobs.has(`run:${id}`) ? 'blocked' : intent.data.status } }
+  }
+  function runIntent(record: Versioned<EntityMap['run']>) { event(record.data.projectId, 'api.run.intent', records.runs.parse(record)) }
+  function runList(projectId?: string) {
+    const combined = runIntents()
+    for (const record of store.list('run')) combined.set(record.data.id, record)
+    return [...combined.keys()].map(id => runRecord(id)!).filter(record => !projectId || record.data.projectId === projectId)
+      .sort((a, b) => a.data.id.localeCompare(b.data.id))
+  }
+  function finishQueuedStop(id: string) {
+    const intent = runIntents().get(id), actual = store.get('run', id)
+    if (intent && actual && ['paused', 'cancelled'].includes(intent.data.status) && actual.data.status !== 'completed' && actual.data.status !== intent.data.status) {
+      store.update('run', { ...actual.data, status: intent.data.status }, actual.version)
+      event(actual.data.projectId, 'api.run.controlled', { id, status: intent.data.status })
+    }
+  }
   function launch(key: string, projectId: string, signal: AbortSignal, work: (signal: AbortSignal) => Promise<unknown>) {
     if (jobs.has(key) || events(store).some(e => e.type === 'api.job.started' && (e.data as Record<string, JsonValue>).key === key)) throw new ApiError(409, 'RECONCILIATION_REQUIRED')
     const controller = new AbortController()
@@ -70,17 +101,19 @@ export function createDomainServices(options: DomainServiceOptions): ApiServices
         await work(AbortSignal.any([signal, controller.signal]))
         event(projectId, 'api.job.finished', { key })
       } catch { event(projectId, 'api.job.failed', { key, reason: 'RUNTIME_CONFLICT' }) }
-    }).finally(() => { jobs.delete(key) })
+    }).finally(() => { if (key.startsWith('run:')) finishQueuedStop(key.slice(4)); jobs.delete(key) })
     jobs.set(key, { controller, done })
   }
-  async function context(planId: string, runId: string) {
+  async function context(planId: string, runId: string, signal?: AbortSignal) {
+    signal?.throwIfAborted()
     const existing = contexts.get(runId)
     if (existing) {
       if (existing.policy.snapshot.plan.id !== planId) throw new ApiError(409, 'POLICY_MISMATCH')
       return existing
     }
     if (!options.executionContext) throw new ApiError(503, 'RUNTIME_UNCONFIGURED')
-    const loaded = await options.executionContext(planId, runId)
+    const loaded = await options.executionContext(planId, runId, signal)
+    signal?.throwIfAborted()
     if (loaded.policy.snapshot.plan.id !== planId) throw new ApiError(409, 'POLICY_MISMATCH')
     contexts.set(runId, loaded); return loaded
   }
@@ -94,12 +127,13 @@ export function createDomainServices(options: DomainServiceOptions): ApiServices
       requireOpen()
       if (resource === 'catalog') return loadCatalog(options.catalogRoot)
       if (resource === 'runStatus') {
-        const run = store.get('run', id!)
-        if (run) return options.execution?.status(id!) ?? { id, status: run.data.status }
+        const run = store.get('run', id!), record = runRecord(id!)
+        if (run) return options.execution?.status(id!) ?? { id, status: record!.data.status }
+        if (record) return { id, status: record.data.status, version: record.version,
+          ...(record.data.status === 'blocked' ? { reason: 'RECONCILIATION_REQUIRED' } : {}) }
         const history = events(store).filter(e => (e.data as Record<string, JsonValue>)?.key === `run:${id}`)
         if (!history.length) throw new ApiError(404, 'NOT_FOUND')
-        if (history.at(-1)!.type === 'api.job.failed') return { id, status: 'blocked', reason: 'RUNTIME_CONFLICT' }
-        return jobs.has(`run:${id}`) ? { id, status: 'queued' } : { id, status: 'blocked', reason: 'RECONCILIATION_REQUIRED' }
+        return { id, status: 'blocked', version: 1, reason: 'RECONCILIATION_REQUIRED' }
       }
       if (resource === 'planningStatus') {
         const demand = demandRecord(id!)
@@ -121,6 +155,11 @@ export function createDomainServices(options: DomainServiceOptions): ApiServices
           requirements: value.demand.requirements, citations: value.roles.flatMap(role => role.citations), productGoal: value.productGoal, sprintGoal: value.sprintGoal, productBacklog: value.productBacklog, sprintBacklog: value.sprintBacklog, definitionOfDone: value.definitionOfDone, roles: value.roles })
       }
       if (!(resource in kinds)) throw new ApiError(404, 'NOT_FOUND')
+      if (resource === 'runs') {
+        const result = id ? runRecord(id) : runList(query.projectId)
+        if (!result) throw new ApiError(404, 'NOT_FOUND')
+        return result
+      }
       if (resource === 'demands') {
         if (id) { const value = demandRecord(id); if (!value) throw new ApiError(404, 'NOT_FOUND'); return value }
         const combined = drafts()
@@ -196,7 +235,7 @@ export function createDomainServices(options: DomainServiceOptions): ApiServices
         const value = TaskControlSchema.parse(command.body)
         return store.transaction(() => {
           const task = store.get('task', id); if (!task) throw new ApiError(404, 'NOT_FOUND')
-          if (store.list('run', task.data.projectId).some(r => r.data.planId === task.data.planId && ['running', 'awaiting_approval', 'paused', 'interrupted'].includes(r.data.status))) throw new ApiError(409, 'TASK_OWNED_BY_RUN')
+          if (runList(task.data.projectId).some(r => r.data.planId === task.data.planId && ['queued', 'running', 'awaiting_approval', 'paused', 'interrupted'].includes(r.data.status))) throw new ApiError(409, 'TASK_OWNED_BY_RUN')
           const updated = store.update('task', { ...task.data, state: transitionTask(task.data.state,
             { target: value.target, reason: value.reason, eventId: randomUUID(), at: new Date().toISOString() }) }, value.expectedVersion)
           event(task.data.projectId, 'api.task.transitioned', { id, status: updated.data.state.status }); return updated
@@ -237,17 +276,53 @@ export function createDomainServices(options: DomainServiceOptions): ApiServices
         if (!plan) throw new ApiError(404, 'NOT_FOUND')
         if (!options.execution || !options.executionContext) throw new ApiError(503, 'RUNTIME_UNCONFIGURED')
         if (store.get('run', value.id)) throw new ApiError(409, 'RUN_EXISTS')
-        launch(`run:${value.id}`, plan.data.projectId, signal, async activeSignal => {
-          const bound = await context(value.planId, value.id)
-          if (activeSignal.aborted) throw new ApiError(409, 'INTERRUPTED')
-          return options.execution!.start({ id: value.id }, bound.policy, bound.workspace, activeSignal)
+        if (runIntents().has(value.id)) throw new ApiError(409, 'RECONCILIATION_REQUIRED')
+        store.transaction(() => {
+          runIntent({ version: 1, data: { id: value.id, projectId: plan.data.projectId, planId: value.planId, status: 'queued' } })
+          launch(`run:${value.id}`, plan.data.projectId, signal, async activeSignal => {
+            if (activeSignal.aborted || runIntents().get(value.id)?.data.status !== 'queued') throw new ApiError(409, 'INTERRUPTED')
+            const bound = await context(value.planId, value.id, activeSignal)
+            if (activeSignal.aborted || runIntents().get(value.id)?.data.status !== 'queued') throw new ApiError(409, 'INTERRUPTED')
+            return options.execution!.start({ id: value.id }, bound.policy, bound.workspace, activeSignal)
+          })
         })
         return { id: value.id, status: 'accepted' }
       }
       if (resource === 'runs' && id && action) {
         const value = command.body as { expectedVersion: number; retryPush?: boolean }
-        const run = store.get('run', id); if (!run) throw new ApiError(404, 'NOT_FOUND')
-        requireVersion('run', id, value.expectedVersion)
+        const record = runRecord(id), run = store.get('run', id)
+        if (!record) {
+          const legacy = events(store).find(e => e.type === 'api.job.started' && (e.data as Record<string, JsonValue>)?.key === `run:${id}`)
+          if (!legacy) throw new ApiError(404, 'NOT_FOUND')
+          if (value.expectedVersion !== 1) throw new ConflictError()
+          if (action !== 'reconcile') throw new ApiError(409, 'RECONCILIATION_REQUIRED')
+          // Older journals did not store planId: never guess an authority or repeat provisioning.
+          event(legacy.projectId, 'api.run.reconciliation.required', { id, status: 'blocked' })
+          return { id, status: 'blocked', version: 1, reason: 'RECONCILIATION_REQUIRED' }
+        }
+        if (record.version !== value.expectedVersion) throw new ConflictError()
+        if (!run) {
+          if (controls.has(id)) throw new ApiError(409, 'BUSY')
+          if (action === 'pause' || action === 'cancel') {
+            if (record.data.status === 'cancelled') throw new ApiError(409, 'TERMINAL_RUN')
+            const status = action === 'pause' ? 'paused' : 'cancelled'
+            // Persist the stop before aborting/returning; no await on an uncooperative provisioner.
+            store.transaction(() => {
+              const current = runRecord(id)
+              if (!current || current.version !== value.expectedVersion || store.get('run', id)) throw new ConflictError()
+              runIntent({ version: record.version + 1, data: { ...record.data, status } })
+              event(record.data.projectId, 'api.run.controlled', { id, status })
+            })
+            jobs.get(`run:${id}`)?.controller.abort()
+            return { id, status, version: record.version + 1 }
+          }
+          if (action === 'reconcile') {
+            if (record.data.status === 'queued' && jobs.has(`run:${id}`)) throw new ApiError(409, 'BUSY')
+            event(record.data.projectId, 'api.run.reconciliation.required', { id, status: record.data.status })
+            return { id, status: record.data.status, version: record.version, reason: 'RECONCILIATION_REQUIRED' }
+          }
+          throw new ApiError(409, 'RECONCILIATION_REQUIRED')
+        }
         if (!options.execution) throw new ApiError(503, 'RUNTIME_UNCONFIGURED')
         if (controls.has(id)) throw new ApiError(409, 'BUSY')
         if (run.data.status === 'completed' || run.data.status === 'cancelled' && action !== 'reconcile') throw new ApiError(409, 'TERMINAL_RUN')
@@ -266,7 +341,7 @@ export function createDomainServices(options: DomainServiceOptions): ApiServices
           }
           if (job) throw new ApiError(409, 'BUSY')
           const bound = await context(run.data.planId, id)
-          requireVersion('run', id, value.expectedVersion)
+          if (runRecord(id)!.version !== value.expectedVersion) throw new ConflictError()
           if (action === 'reconcile') return options.execution.reconcile({ id, retryPush: value.retryPush ?? false }, bound.policy, bound.workspace)
           if (action === 'resume') {
             // Resume has an explicit new intent, while the runtime retains responsibility for reconciliation.

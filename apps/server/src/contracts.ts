@@ -24,7 +24,7 @@ export interface ApiServices {
 }
 export interface Route { resource: Resource; id?: string; action?: string; input: z.ZodType; output: z.ZodType; query: z.ZodType }
 const listing = z.strictObject({ projectId: IdentifierSchema.optional() })
-export const ExecutionResultSchema = z.strictObject({ id: IdentifierSchema, status: RunStatusSchema,
+export const ExecutionResultSchema = z.strictObject({ id: IdentifierSchema, status: RunStatusSchema, version: VersionSchema.optional(),
   reason: z.string().max(128).regex(/^[A-Z0-9_]+$/).optional() })
 const accepted = z.strictObject({ id: IdentifierSchema, status: z.literal('accepted') })
 const version = z.strictObject({ expectedVersion: VersionSchema })
