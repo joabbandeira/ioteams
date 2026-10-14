@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import {
-  ApprovalDecisionSchema, HostEventSchema, HostTurnInputSchema, IdentifierSchema, GitShaSchema,
+  ApprovalDecisionSchema, HostEventSchema, HostTurnInputSchema, IdentifierSchema, GitShaSchema, ContentHashSchema,
   recordHostEvidence, transitionTask, type ApprovalDecision, type HostAdapter, type HostTurnInput, type RunStatus,
   type TaskTransition, type PlannedTask, type ScrumTask,
 } from '@ioteams/core'
@@ -190,7 +190,7 @@ export class ExecutionService {
           if (!sameSet(review.acceptanceMet, task.acceptanceCriteria) || !sameSet(review.definitionOfDoneMet, plan.definitionOfDone)) fail('REVIEW_INCOMPLETE', 'Revisão não cobriu aceitação e DoD exatas.')
           this.#event(id, 'review', review)
           head = await this.#commit(id, policy, workspace, task, attemptId, head, tree, turnSignal)
-          await this.#deliver(id, policy, workspace, task, attemptId, head, tree.treeHash, review, turnSignal)
+          await this.#deliver(id, policy, workspace, task, attemptId, head, tree, review, turnSignal)
           break
         }
         if (this.#task(task.id).status !== 'DONE') return this.#state(id, 'blocked', 'ATTEMPTS_EXHAUSTED')
@@ -212,10 +212,24 @@ export class ExecutionService {
     return this.#state(id, signal?.aborted ? 'interrupted' : paused ? 'paused' : 'blocked', code)
   }
   async #sources(policy: ApprovedPolicy, task: PlannedTask) {
-    const proposal = planningEvents(this.options.store, policy.snapshot.plan.projectId).find(event =>
-      event.type === 'planning.proposed' && (event.data as unknown as PlanningProposal).policy?.plan?.policyHash === policy.snapshot.plan.policyHash)?.data as unknown as PlanningProposal | undefined
-    // A manually approved operator plan may have no planning/RAG proposal.
-    if (!proposal) return []
+    const approved = this.options.store.get('approvedPlan', policy.snapshot.plan.id)!.data
+    const events = planningEvents(this.options.store, approved.projectId)
+    const approvals = events.filter(event => event.type === 'planning.approved' &&
+      (event.data as { demandId?: string; policyHash?: string }).demandId === approved.demandId &&
+      (event.data as { policyHash?: string }).policyHash === policy.snapshot.plan.policyHash)
+    // Manual operator plans have no planning approval; proposed events grant no sources.
+    if (!approvals.length) return []
+    if (approvals.length !== 1) fail('NO_EVIDENCE', 'Aprovação de planejamento ambígua.')
+    const approval = z.strictObject({ demandId: IdentifierSchema, policyHash: ContentHashSchema, proposalHash: ContentHashSchema }).parse(approvals[0].data)
+    const proposals = events.filter(event => event.type === 'planning.proposed' &&
+      (event.data as unknown as PlanningProposal).demand?.id === approved.demandId &&
+      (event.data as unknown as PlanningProposal).hash === approval.proposalHash &&
+      (event.data as unknown as PlanningProposal).policy?.plan?.policyHash === approval.policyHash)
+    if (proposals.length !== 1) fail('NO_EVIDENCE', 'Proposta efetivamente aprovada ausente ou ambígua.')
+    const proposal = proposals[0].data as unknown as PlanningProposal
+    const { hash, ...body } = proposal
+    if (hash !== sha256(canonicalJson(body)) || canonicalJson(proposal.policy) !== canonicalJson(policy.snapshot))
+      fail('NO_EVIDENCE', 'Conteúdo da proposta diverge da aprovação exata.')
     const role = proposal.roles.find(record => record.role === 'Developer' && record.professionalId === task.professionalId)
     if (!role) fail('NO_EVIDENCE', 'Proposta aprovada não contém fontes do Developer designado.')
     const citations = PlanningRoleRecordSchema.parse(role).citations
@@ -342,24 +356,36 @@ export class ExecutionService {
   }
   async #remote(policy: ApprovedPolicy, workspace: Workspace): Promise<string> {
     const plan = policy.snapshot.plan, ref = `refs/heads/${plan.branch}`
-    const output = (await gitCommand(workspace.repository.root, ['ls-remote', '--exit-code', plan.remote, ref])).trim().split('\n')
+    const output = (await gitCommand(workspace.repository.root, ['ls-remote', '--exit-code', policy.snapshot.repository.remoteUrl, ref])).trim().split('\n')
     if (output.length !== 1 || output[0].split('\t')[1] !== ref) fail('REMOTE_DIVERGED', 'Remote não confirmou referência exata.')
     return GitShaSchema.parse(output[0].split('\t')[0])
   }
-  async #deliver(id: string, policy: ApprovedPolicy, workspace: Workspace, task: PlannedTask, attemptId: string, sha: string, treeHash: string, review: Review, signal: AbortSignal) {
+  async #deliveryGuard(policy: ApprovedPolicy, workspace: Workspace, taskId: string, sha: string, baseSha: string, tree: TestedTree) {
+    await this.#guard(policy, workspace, taskId, sha, baseSha, true)
+    await assertTree(workspace.repository.root, { treeHash: tree.treeHash, workingHash: tree.workingHash })
+    await workspace.assertOwned()
+  }
+  async #deliver(id: string, policy: ApprovedPolicy, workspace: Workspace, task: PlannedTask, attemptId: string, sha: string, tree: TestedTree, review: Review, signal: AbortSignal) {
     assertActive(signal)
-    const state = this.#task(task.id)
+    const state = this.#task(task.id), baseSha = state.attempts.at(-1)!.baseSha!
+    await this.#deliveryGuard(policy, workspace, task.id, sha, baseSha, tree)
     if (state.delivery.pushRequired) {
       const expectedRemoteSha = this.#events(id).filter(e => e.type === 'execution.push.result').map(e => (e.data as { sha: string }).sha).at(-1) ?? policy.snapshot.plan.baseSha
       if (await this.#remote(policy, workspace) !== expectedRemoteSha) fail('REMOTE_DIVERGED', 'Remote avançou antes da entrega; reconciliação necessária.')
       assertActive(signal)
-      this.#event(id, 'push.intent', { taskId: task.id, attemptId, sha, treeHash, expectedRemoteSha })
-      await gitCommand(workspace.repository.root, ['push', '--porcelain', policy.snapshot.plan.remote, `${sha}:refs/heads/${policy.snapshot.plan.branch}`])
+      this.#event(id, 'push.intent', { taskId: task.id, attemptId, sha, treeHash: tree.treeHash, expectedRemoteSha })
+      // Recheck after the remote observation and durable intent; effects use the
+      // immutable URL, never a repository alias that another process can replace.
+      await this.#deliveryGuard(policy, workspace, task.id, sha, baseSha, tree)
+      assertActive(signal)
+      await gitCommand(workspace.repository.root, ['push', '--porcelain', policy.snapshot.repository.remoteUrl, `${sha}:refs/heads/${policy.snapshot.plan.branch}`])
       if (await this.#remote(policy, workspace) !== sha) fail('PUSH_UNCERTAIN', 'Remote não confirmou exatamente o commit autorizado.')
+      await this.#deliveryGuard(policy, workspace, task.id, sha, baseSha, tree)
       this.#event(id, 'push.result', { taskId: task.id, attemptId, sha })
     }
+    await this.#deliveryGuard(policy, workspace, task.id, sha, baseSha, tree)
     assertActive(signal)
-    this.#finish(task.id, policy, sha, treeHash, review)
+    this.#finish(task.id, policy, sha, tree.treeHash, review)
   }
   #finish(taskId: string, policy: ApprovedPolicy, sha: string, treeHash: string, review: Review) {
     this.#transition(taskId, { target: 'DONE', completion: { mode: 'operational', acceptanceMet: review.acceptanceMet,
@@ -389,19 +415,24 @@ export class ExecutionService {
       const review = reviewSchema.parse(reviewEvent?.data)
       if (!review.approved || review.testedTreeHash !== intent.treeHash) fail('REVIEW_MISMATCH', 'Revisão persistida não cobre o commit.')
       if (!events.some(e => e.type === 'execution.commit.result' && (e.data as { sha: string }).sha === sha)) this.#event(id, 'commit.result', { taskId: intent.taskId, attemptId: intent.attemptId, sha, treeHash: intent.treeHash })
+      await this.#deliveryGuard(policy, workspace, intent.taskId, sha, intent.parentSha, intent)
       if (state.delivery.pushRequired) {
         let remote = await this.#remote(policy, workspace)
         const push = events.filter(e => e.type === 'execution.push.intent' && (e.data as { sha: string }).sha === sha).at(-1)?.data as { expectedRemoteSha: string } | undefined
+        await this.#deliveryGuard(policy, workspace, intent.taskId, sha, intent.parentSha, intent)
         if (remote !== sha && retryPush) {
           const expected = push?.expectedRemoteSha ?? events.filter(e => e.type === 'execution.push.result').map(e => (e.data as { sha: string }).sha).at(-1) ?? policy.snapshot.plan.baseSha
           if (remote !== expected) fail('REMOTE_DIVERGED', 'Remote avançou; não repetir push.')
           this.#event(id, 'push.intent', { taskId: intent.taskId, attemptId: intent.attemptId, sha, treeHash: intent.treeHash, expectedRemoteSha: expected })
-          await gitCommand(workspace.repository.root, ['push', '--porcelain', policy.snapshot.plan.remote, `${sha}:refs/heads/${policy.snapshot.plan.branch}`])
+          await this.#deliveryGuard(policy, workspace, intent.taskId, sha, intent.parentSha, intent)
+          await gitCommand(workspace.repository.root, ['push', '--porcelain', policy.snapshot.repository.remoteUrl, `${sha}:refs/heads/${policy.snapshot.plan.branch}`])
           remote = await this.#remote(policy, workspace)
+          await this.#deliveryGuard(policy, workspace, intent.taskId, sha, intent.parentSha, intent)
         }
         if (remote !== sha) return this.#state(id, 'paused', push && remote === push.expectedRemoteSha ? 'PUSH_NOT_CONFIRMED' : 'REMOTE_DIVERGED')
         if (!events.some(e => e.type === 'execution.push.result' && (e.data as { sha: string }).sha === sha)) this.#event(id, 'push.result', { taskId: intent.taskId, attemptId: intent.attemptId, sha })
       }
+      await this.#deliveryGuard(policy, workspace, intent.taskId, sha, intent.parentSha, intent)
       if (state.status !== 'DONE') this.#finish(intent.taskId, policy, sha, intent.treeHash, review)
       return this.#state(id, policy.snapshot.plan.tasks.every(t => this.#task(t.id).status === 'DONE') ? 'completed' : 'paused', policy.snapshot.plan.tasks.every(t => this.#task(t.id).status === 'DONE') ? undefined : 'RECONCILED_REMAINING_TASKS')
     } catch (error) { return this.#failure(id, error) }

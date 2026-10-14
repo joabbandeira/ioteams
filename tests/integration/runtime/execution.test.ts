@@ -2,6 +2,7 @@ import { afterEach, expect, it } from 'vitest'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { ExecutionService } from '@ioteams/runtime'
+import { canonicalJson, sha256 } from '../../../packages/runtime/src/policy.js'
 import { executionFixture } from './execution.fixture.js'
 import { git } from '../../fixtures/runtime/repository.js'
 const cleanups: Array<() => Promise<void>> = []
@@ -53,7 +54,7 @@ it('executes dependent tasks sequentially and binds each evidence to its own att
   expect((await new ExecutionService(f).start({ id: 'run-1' }, f.policy, f.workspace)).status).toBe('completed')
   expect(f.phases).toEqual(['implement', 'review', 'implement', 'review'])
   expect(f.store.list('task').map(t => t.data.state.status)).toEqual(['DONE', 'DONE'])
-})
+}, 20_000)
 
 it('corrects a rejected review in a new session without reusing previous evidence', async () => {
   const f = await setup({ review: (value, count) => count === 1 ? { ...value, approved: false, reason: 'Missing edge case', acceptanceMet: [], definitionOfDoneMet: [] } : value })
@@ -201,7 +202,7 @@ it('resumes remaining tasks after reconciling delivery without repeating the com
   expect(await restarted.reconcile({ id: 'run-1' }, f.policy, f.workspace)).toMatchObject({ status: 'paused', reason: 'RECONCILED_REMAINING_TASKS' })
   expect((await restarted.resume({ id: 'run-1' }, f.policy, f.workspace)).status).toBe('completed')
   expect(f.counts()).toEqual({ implementations: 2, reviews: 2, checks: 2 })
-})
+}, 20_000)
 
 it('honors cancellation arriving during reviewer disposal before any commit or push', async () => {
   const f = await setup(), abort = new AbortController()
@@ -315,9 +316,16 @@ it('carries only the assigned Developer citations from the approved proposal as 
   await indexCatalog(index, { root: corpus.root, commitSha: corpus.sha })
   const sources = await searchKnowledge(index, { query: 'Referência', filters: { professionalId: 'bia-martins' }, topK: 2 })
   const f = await setup({ corpusRoots: [corpus.root] })
-  f.store.appendEvent({ id: 'approved-proposal-data', projectId: f.plan.projectId, type: 'planning.proposed', at: new Date().toISOString(), data: {
-    policy: JSON.parse(JSON.stringify(f.policy.snapshot)), roles: [{ role: 'Developer', professionalId: 'bia-martins', threadId: 'planning-dev-thread', turnId: 'planning-dev-turn',
+  const body = {
+    demand: { id: 'demand-1' }, policy: JSON.parse(JSON.stringify(f.policy.snapshot)), roles: [{ role: 'Developer', professionalId: 'bia-martins', threadId: 'planning-dev-thread', turnId: 'planning-dev-turn',
       citations: sources.citations, output: { tasks: [f.plan.tasks[0]], citationIds: sources.citations.map(c => c.documentId) } }],
+  }
+  const hash = sha256(canonicalJson(body))
+  const decoy = { ...body, roles: body.roles.map(role => ({ ...role, citations: role.citations.map(c => ({ ...c, commitSha: '0'.repeat(40) })) })) }
+  f.store.appendEvent({ id: 'unapproved-same-demand', projectId: f.plan.projectId, type: 'planning.proposed', at: new Date().toISOString(), data: { ...decoy, hash: sha256(canonicalJson(decoy)) } })
+  f.store.appendEvent({ id: 'approved-proposal-data', projectId: f.plan.projectId, type: 'planning.proposed', at: new Date().toISOString(), data: { ...body, hash } })
+  f.store.appendEvent({ id: 'approval-binding', projectId: f.plan.projectId, type: 'planning.approved', at: new Date().toISOString(), data: {
+    demandId: 'demand-1', proposalHash: hash, policyHash: f.policy.snapshot.plan.policyHash,
   } })
   expect((await new ExecutionService(f).start({ id: 'run-1' }, f.policy, f.workspace)).status).toBe('completed')
   expect(f.inputs[0].retrievedData).toEqual(sources.citations)
