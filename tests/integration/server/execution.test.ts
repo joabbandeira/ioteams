@@ -73,7 +73,7 @@ it('allows explicit reconciliation after cancellation and never retries an inter
   const reconciled = await f.service.execute({ resource: 'runs', id: 'r1', action: 'reconcile', body: { expectedVersion: await version(), retryPush: false } }, f.signal)
   expect(reconciled).toEqual({ id: 'r1', status: 'paused', reason: 'RECONCILIATION_REQUIRED' })
   await f.service.execute({ resource: 'runs', id: 'r1', action: 'resume', body: { expectedVersion: await version() } }, f.signal)
-  await expect.poll(() => f.store.eventsAfter(0).filter(e => e.type === 'api.job.finished').length).toBe(2)
+  await expect.poll(() => f.store.eventsAfter(0).filter(e => e.type === 'api.job.finished').length).toBe(3)
   expect(await f.service.read('runStatus', 'r1', {})).toEqual({ id: 'r1', status: 'paused', reason: 'RECONCILIATION_REQUIRED' })
   expect(f.inputs).toHaveLength(1); expect(f.counts().checks).toBe(0)
 })

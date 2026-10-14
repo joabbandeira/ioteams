@@ -25,7 +25,7 @@ function events(store: Store, projectId?: string) {
 }
 export function createDomainServices(options: DomainServiceOptions): ApiServices {
   const { store } = options
-  const jobs = new Map<string, { controller: AbortController; done: Promise<void> }>()
+  const jobs = new Map<string, { controller: AbortController; done: Promise<void>; jobId: string; interruptible: boolean }>()
   const contexts = new Map<string, ExecutionContext>(), controls = new Set<string>()
   let closed = false
   function requireOpen() { if (closed) throw new ApiError(503, 'SERVER_CLOSING') }
@@ -67,15 +67,31 @@ export function createDomainServices(options: DomainServiceOptions): ApiServices
     }
     return result
   }
+  function runActivity(id: string) {
+    const key = `run:${id}`, history = events(store)
+    const started = history.filter(e => e.type === 'api.job.started' && (e.data as Record<string, JsonValue>)?.key === key).at(-1)
+    const jobId = (started?.data as Record<string, JsonValue> | undefined)?.jobId
+    // Legacy/incomplete ownership is uncertainty, never evidence that an external writer stopped.
+    if (!started || typeof jobId !== 'string') return { jobId: undefined, settled: false }
+    const settled = history.some(e => e.sequence > started.sequence && ['api.job.finished', 'api.job.failed'].includes(e.type) &&
+      (e.data as Record<string, JsonValue>)?.key === key && (e.data as Record<string, JsonValue>)?.jobId === jobId)
+    return { jobId, settled }
+  }
+  function ownedJob(id: string) {
+    const job = jobs.get(`run:${id}`)
+    return job && runActivity(id).jobId === job.jobId ? job : undefined
+  }
   function runRecord(id: string): Versioned<EntityMap['run']> | undefined {
     const actual = store.get('run', id), intent = runIntents().get(id)
     if (!intent) return actual
     if (actual) {
       if (actual.data.planId !== intent.data.planId || actual.data.projectId !== intent.data.projectId) throw new ApiError(409, 'RUN_MISMATCH')
-      const stopped = ['paused', 'cancelled'].includes(intent.data.status) && actual.data.status !== 'completed'
-      return records.runs.parse({ version: intent.version + actual.version, data: { ...actual.data, ...(stopped ? { status: intent.data.status } : {}) } })
+      // The intent remains history; it must not mask a reconciled/resumed operational record.
+      return records.runs.parse({ version: intent.version + actual.version, data: actual.data })
     }
-    return { ...intent, data: { ...intent.data, status: intent.data.status === 'queued' && !jobs.has(`run:${id}`) ? 'blocked' : intent.data.status } }
+    const owner = ownedJob(id)
+    const confirmed = intent.data.status === 'queued' ? !!owner : !!owner?.controller.signal.aborted || runActivity(id).settled
+    return { ...intent, data: { ...intent.data, status: confirmed ? intent.data.status : 'blocked' } }
   }
   function runIntent(record: Versioned<EntityMap['run']>) { event(record.data.projectId, 'api.run.intent', records.runs.parse(record)) }
   function runList(projectId?: string) {
@@ -91,18 +107,28 @@ export function createDomainServices(options: DomainServiceOptions): ApiServices
       event(actual.data.projectId, 'api.run.controlled', { id, status: intent.data.status })
     }
   }
+  function startJob<T>(key: string, projectId: string, signal: AbortSignal, work: (signal: AbortSignal) => Promise<T>, interruptible = true, settleStop = false) {
+    if (jobs.has(key)) throw new ApiError(409, 'BUSY')
+    const controller = new AbortController(), jobId = randomUUID()
+    event(projectId, 'api.job.started', { key, jobId })
+    const result = Promise.resolve().then(() => {
+      if (key.startsWith('run:') && runActivity(key.slice(4)).jobId !== jobId) throw new ApiError(409, 'RECONCILIATION_REQUIRED')
+      return work(AbortSignal.any([signal, controller.signal]))
+    })
+    const finish = (type: 'finished' | 'failed') => store.transaction(() => {
+      // Publish terminal proof only AFTER the owner's final domain writes, atomically.
+      if (settleStop) finishQueuedStop(key.slice(4))
+      event(projectId, `api.job.${type}`, { key, jobId, ...(type === 'failed' ? { reason: 'RUNTIME_CONFLICT' } : {}) })
+    })
+    const done = result.then(() => finish('finished'), () => finish('failed')).finally(() => {
+      if (jobs.get(key)?.jobId === jobId) jobs.delete(key)
+    })
+    jobs.set(key, { controller, done, jobId, interruptible })
+    return { result, done }
+  }
   function launch(key: string, projectId: string, signal: AbortSignal, work: (signal: AbortSignal) => Promise<unknown>) {
-    if (jobs.has(key) || events(store).some(e => e.type === 'api.job.started' && (e.data as Record<string, JsonValue>).key === key)) throw new ApiError(409, 'RECONCILIATION_REQUIRED')
-    const controller = new AbortController()
-    event(projectId, 'api.job.started', { key })
-    // Defer work so the controller and ownership exist before a synchronous callback can settle.
-    const done = Promise.resolve().then(async () => {
-      try {
-        await work(AbortSignal.any([signal, controller.signal]))
-        event(projectId, 'api.job.finished', { key })
-      } catch { event(projectId, 'api.job.failed', { key, reason: 'RUNTIME_CONFLICT' }) }
-    }).finally(() => { if (key.startsWith('run:')) finishQueuedStop(key.slice(4)); jobs.delete(key) })
-    jobs.set(key, { controller, done })
+    if (events(store).some(e => e.type === 'api.job.started' && (e.data as Record<string, JsonValue>).key === key)) throw new ApiError(409, 'RECONCILIATION_REQUIRED')
+    startJob(key, projectId, signal, work, true, key.startsWith('run:'))
   }
   async function context(planId: string, runId: string, signal?: AbortSignal) {
     signal?.throwIfAborted()
@@ -310,10 +336,11 @@ export function createDomainServices(options: DomainServiceOptions): ApiServices
             store.transaction(() => {
               const current = runRecord(id)
               if (!current || current.version !== value.expectedVersion || store.get('run', id)) throw new ConflictError()
+              if (!ownedJob(id) && !runActivity(id).settled) throw new ApiError(409, 'RECONCILIATION_REQUIRED')
               runIntent({ version: record.version + 1, data: { ...record.data, status } })
               event(record.data.projectId, 'api.run.controlled', { id, status })
             })
-            jobs.get(`run:${id}`)?.controller.abort()
+            ownedJob(id)?.controller.abort()
             return { id, status, version: record.version + 1 }
           }
           if (action === 'reconcile') {
@@ -328,31 +355,37 @@ export function createDomainServices(options: DomainServiceOptions): ApiServices
         if (run.data.status === 'completed' || run.data.status === 'cancelled' && action !== 'reconcile') throw new ApiError(409, 'TERMINAL_RUN')
         controls.add(id)
         try {
-          const job = jobs.get(`run:${id}`)
+          const job = ownedJob(id)
           if (action === 'pause' || action === 'cancel') {
-            if (!job && ['running', 'awaiting_approval'].includes(run.data.status)) throw new ApiError(409, 'RECONCILIATION_REQUIRED')
+            if (job && !job.interruptible) throw new ApiError(409, 'BUSY')
+            if (!job && !runActivity(id).settled) throw new ApiError(409, 'RECONCILIATION_REQUIRED')
             if (job) { job.controller.abort(); await job.done }
-            const current = store.get('run', id)!
-            if (current.data.status === 'completed') return { id, status: 'completed' }
-            const status = action === 'pause' ? 'paused' : 'cancelled'
-            store.update('run', { ...current.data, status }, current.version)
-            event(current.data.projectId, 'api.run.controlled', { id, status })
-            return { id, status }
+            return store.transaction(() => {
+              if (!job && (!runActivity(id).settled || runRecord(id)!.version !== value.expectedVersion)) throw new ApiError(409, 'RECONCILIATION_REQUIRED')
+              const current = store.get('run', id)!
+              if (current.data.status === 'completed') return { id, status: 'completed' }
+              const status = action === 'pause' ? 'paused' : 'cancelled'
+              store.update('run', { ...current.data, status }, current.version)
+              event(current.data.projectId, 'api.run.controlled', { id, status })
+              return { id, status }
+            })
           }
           if (job) throw new ApiError(409, 'BUSY')
-          const bound = await context(run.data.planId, id)
-          if (runRecord(id)!.version !== value.expectedVersion) throw new ConflictError()
-          if (action === 'reconcile') return options.execution.reconcile({ id, retryPush: value.retryPush ?? false }, bound.policy, bound.workspace)
-          if (action === 'resume') {
-            // Resume has an explicit new intent, while the runtime retains responsibility for reconciliation.
-            const controller = new AbortController()
-            const done = options.execution.resume({ id }, bound.policy, bound.workspace, AbortSignal.any([signal, controller.signal]))
-              .then(result => { event(run.data.projectId, 'api.job.finished', { key: `run:${id}`, result }) })
-              .catch(() => { event(run.data.projectId, 'api.job.failed', { key: `run:${id}`, reason: 'RUNTIME_CONFLICT' }) })
-              .finally(() => { jobs.delete(`run:${id}`) })
-            jobs.set(`run:${id}`, { controller, done })
-            return { id, status: store.get('run', id)!.data.status }
-          }
+          if (!['resume', 'reconcile'].includes(action)) throw new ApiError(404, 'NOT_FOUND')
+          // Claim a distinct persisted generation before ANY async context/runtime boundary.
+          const activity = store.transaction(() => {
+            if (runRecord(id)!.version !== value.expectedVersion) throw new ConflictError()
+            if (!runActivity(id).settled) throw new ApiError(409, 'RECONCILIATION_REQUIRED')
+            return startJob(`run:${id}`, run.data.projectId, signal, async activeSignal => {
+              const bound = await context(run.data.planId, id, activeSignal)
+              if (runRecord(id)!.version !== value.expectedVersion) throw new ConflictError()
+              return action === 'reconcile'
+                ? options.execution!.reconcile({ id, retryPush: value.retryPush ?? false }, bound.policy, bound.workspace)
+                : options.execution!.resume({ id }, bound.policy, bound.workspace, activeSignal)
+            }, action !== 'reconcile')
+          })
+          if (action === 'reconcile') { try { return await activity.result } finally { await activity.done } }
+          return { id, status: store.get('run', id)!.data.status }
         } finally { controls.delete(id) }
       }
       if (resource === 'approvals' && id && action === 'decide') {

@@ -43,14 +43,16 @@ it.each(['pause', 'cancel'] as const)('persists queued %s before late provisioni
   expect(await restarted.execute({ resource: 'runs', id, action: 'reconcile', body: { expectedVersion: 2 } }, f.signal)).toEqual({ id, status, version: 2, reason: 'RECONCILIATION_REQUIRED' })
   await expect(restarted.execute({ resource: 'runs', id, action: 'resume', body: { expectedVersion: 2 } }, f.signal)).rejects.toThrow()
 })
-it('honors a durable queued stop from a replacement service when the previous provisioner eventually returns', async () => {
+it('rejects an unowned stop until the owner confirms termination, while preserving the owned stop', async () => {
   const f = await setup(), id = 'queued-restart'
   await f.service.execute({ resource: 'runs', body: { id, planId: f.plan.id } }, f.signal); await f.provisioning
   const reopened = openStore({ directory: f.operations, checkoutRoots: [f.source, f.workspaceRoot] }); cleanup.push(() => reopened.close())
   const replacement = createDomainServices({ ...f.options, store: reopened, execution: new ExecutionService({ ...f, store: reopened }) })
   cleanup.push(() => replacement.close!())
   expect(await replacement.read('runStatus', id, {})).toEqual({ id, status: 'blocked', version: 1, reason: 'RECONCILIATION_REQUIRED' })
-  expect(await replacement.execute({ resource: 'runs', id, action: 'cancel', body: { expectedVersion: 1 } }, f.signal)).toEqual({ id, status: 'cancelled', version: 2 })
+  await expect(replacement.execute({ resource: 'runs', id, action: 'cancel', body: { expectedVersion: 1 } }, f.signal)).rejects.toMatchObject({ code: 'RECONCILIATION_REQUIRED' })
+  expect(await replacement.read('runStatus', id, {})).toEqual({ id, status: 'blocked', version: 1, reason: 'RECONCILIATION_REQUIRED' })
+  await f.service.execute({ resource: 'runs', id, action: 'cancel', body: { expectedVersion: 1 } }, f.signal)
   f.release(); await f.service.close!()
   expect(f.counts()).toEqual({ implementations: 0, reviews: 0, checks: 0 })
   expect(await replacement.read('runStatus', id, {})).toEqual({ id, status: 'cancelled', version: 2 })
@@ -98,11 +100,10 @@ it('reconciles the earlier job-only journal format without guessing its missing 
   expect(f.counts()).toEqual({ implementations: 0, reviews: 0, checks: 0 })
 })
 
-it('checks a persisted stop before even invoking a deferred provisioner from the previous service', async () => {
+it('checks an owned persisted stop before even invoking its deferred provisioner', async () => {
   const f = await setup(), id = 'queued-before-provision'
   const accepted = f.service.execute({ resource: 'runs', body: { id, planId: f.plan.id } }, f.signal)
-  const replacement = createDomainServices(f.options); cleanup.push(() => replacement.close!())
-  await replacement.execute({ resource: 'runs', id, action: 'cancel', body: { expectedVersion: 1 } }, f.signal)
+  await f.service.execute({ resource: 'runs', id, action: 'cancel', body: { expectedVersion: 1 } }, f.signal)
   await accepted; f.release(); await f.service.close!()
   expect(f.provisionCount()).toBe(0)
   expect(f.counts()).toEqual({ implementations: 0, reviews: 0, checks: 0 })
@@ -120,7 +121,7 @@ it('rechecks queued CAS inside the SQLite transaction when another connection ch
     return transaction(operation)
   })
   await expect(f.service.execute({ resource: 'runs', id, action: 'pause', body: { expectedVersion: 1 } }, f.signal)).rejects.toThrow()
-  expect(await f.service.read('runStatus', id, {})).toEqual({ id, status: 'cancelled', version: 2 })
+  expect(await f.service.read('runStatus', id, {})).toEqual({ id, status: 'blocked', version: 2, reason: 'RECONCILIATION_REQUIRED' })
   f.release(); await f.service.close!()
   expect(f.counts()).toEqual({ implementations: 0, reviews: 0, checks: 0 })
 })
