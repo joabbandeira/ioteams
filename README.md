@@ -4,7 +4,13 @@ O ioteams é a concepção de uma camada modular de conhecimento, composição p
 
 O acoplamento é opcional para o workflow hospedeiro. Ele deverá continuar capaz de operar sem o ioteams e de substituir essa camada. Quando uma equipe atuar pelo modelo ioteams, a aplicação do Scrum faz parte das suas regras de organização.
 
-**Estado do projeto:** concepção documentada e protótipo exploratório local com dados fictícios. A execução de agentes, a recuperação de conhecimento por RAG e a integração com um workflow são desenvolvimentos futuros. Esta entrega do repositório reúne a documentação conceitual.
+**Estado do projeto:** concepção documentada e protótipo exploratório com dados fictícios. A execução de agentes, a recuperação de conhecimento por RAG e a integração com um workflow são desenvolvimentos futuros. O repositório reúne a documentação conceitual, o código-fonte do painel e um HTML pronto para execução e hospedagem.
+
+## Painel interativo
+
+O painel LISA demonstra equipe, eventos Scrum, objetivos e quadro Kanban, com temas claro e escuro. Consulte o [guia de execução e publicação](docs/como-executar-e-publicar-o-painel.md) para abrir o HTML pronto, executar localmente ou hospedar no GitHub Pages.
+
+O código-fonte está em [painel/](painel/README.md), e o artefato estático está em [docs/index.html](docs/index.html). As interações usam dados fictícios e são descartadas ao recarregar a página.
 
 ## Qual problema resolve
 

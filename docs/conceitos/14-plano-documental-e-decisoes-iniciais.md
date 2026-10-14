@@ -82,7 +82,7 @@ A base não incorpora um script obrigatório de despacho de agentes, um motor de
 
 ## Organização desta entrega
 
-Esta etapa entrega um `README.md` principal e 14 documentos individuais em `docs/conceitos/`. `README.md` e `docs/` organizam a explicação do projeto; não são entidades adicionais do domínio.
+A base documental reúne um `README.md` principal e 14 documentos individuais em `docs/conceitos/`. O repositório também contém o código do protótipo em `painel/`, seu HTML estático em `docs/index.html` e o guia de execução e publicação. Esses arquivos organizam a explicação e a demonstração do projeto; não são entidades adicionais do domínio.
 
 Os diretórios `profissoes/`, `profissionais/`, `equipes/` e `stacks/` constituem a arquitetura de referência para o conteúdo de domínio a ser materializado posteriormente. Esta publicação não afirma que todos os perfis, stacks e arquivos dessa arquitetura já estejam preenchidos.
 

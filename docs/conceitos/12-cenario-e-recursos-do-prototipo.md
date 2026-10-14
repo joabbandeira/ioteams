@@ -2,7 +2,7 @@
 
 [Visão geral do projeto](../../README.md)
 
-O protótipo local usa o produto fictício **Trilha iOS** e a equipe **LISA** para tornar a ideia observável. Pessoas, tarefas, datas e situações são exemplos, sem representar uma operação real ou resultados de agentes autônomos.
+O protótipo usa o produto fictício **Trilha iOS** e a equipe **LISA** para tornar a ideia observável. Pessoas, tarefas, datas e situações são exemplos, sem representar uma operação real ou resultados de agentes autônomos.
 
 ## Produto e objetivos
 
@@ -68,4 +68,4 @@ Os dados são mantidos em memória na página. Recarregá-la restaura o cenário
 
 O painel não executa agentes, não consulta um RAG, não conecta ferramentas de desenvolvimento e não implementa permissões de backend. Seus controles simulam a dinâmica que ajudou a discutir o projeto.
 
-Esta publicação contém a documentação conceitual. O código e a execução do protótipo local não fazem parte desta entrega ao repositório. O painel é uma referência de interação, enquanto a arquitetura futura está no [conceito 13](13-direcao-futura-e-acoplamento.md).
+O código-fonte do painel está em [painel/](../../painel/README.md), e o HTML pronto está em [docs/index.html](../index.html). O [guia de execução e publicação](../como-executar-e-publicar-o-painel.md) explica como executá-lo e hospedá-lo. O painel é uma referência de interação, enquanto a arquitetura futura está no [conceito 13](13-direcao-futura-e-acoplamento.md).
