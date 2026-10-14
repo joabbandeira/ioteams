@@ -1,4 +1,6 @@
 export { createCodexHost, CodexHost, type CodexHostOptions } from './host.js'
-export { initializeRuntimeHome, type RuntimeOptions } from './runtime.js'
+export { initializeRuntimeHome, validateRuntimeHome, runtimeEnvironment, type RuntimeOptions } from './runtime.js'
 export { CodexHostError } from './errors.js'
 export { FakeHostAdapter } from './fake.js'
+export { verifyCodexExecutable, type VerifiedCodexExecutable } from './executable.js'
+export { bindNativeApprovalAuthority, type NativeApprovalAuthority } from './approvals.js'

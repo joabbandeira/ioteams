@@ -1,0 +1,24 @@
+{
+  "name": "@ioteams/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "npm run typecheck",
+    "start": "node --import tsx src/main.ts"
+  },
+  "dependencies": {
+    "@ioteams/catalog": "0.1.0",
+    "@ioteams/codex": "0.1.0",
+    "@ioteams/core": "0.1.0",
+    "@ioteams/knowledge": "0.1.0",
+    "@ioteams/server": "0.1.0",
+    "zod": "4.6.7",
+    "@ioteams/runtime": "0.1.0",
+    "@ioteams/storage": "0.1.0"
+  }
+}

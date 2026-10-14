@@ -35,6 +35,7 @@ it('subconjunto vazio retorna indisponível, com saída não zero', async () => 
   const root = await mkdtemp(join(tmpdir(), 'ioteams-t01-runner-')); temporary.push(root)
   await mkdir(join(root, 'scripts'))
   await writeFile(join(root, 'scripts/test.mjs'), await readFile(join(repo, 'scripts/test.mjs')))
+  await writeFile(join(root, 'scripts/test-runner.ts'), await readFile(join(repo, 'scripts/test-runner.ts')))
   const result = await exec(process.execPath, ['scripts/test.mjs', 'integration'], { cwd: root }).then(
     r => ({ code: 0, output: r.stdout + r.stderr }),
     (e: { code: number; stdout: string; stderr: string }) => ({ code: e.code, output: e.stdout + e.stderr }),

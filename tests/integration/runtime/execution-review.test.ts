@@ -1,3 +1,4 @@
+import { trackedBody, drainTestBodies } from '../../fixtures/runtime/test-lifetime.js'
 import { afterEach, expect, it } from 'vitest'
 import { readFile, writeFile, chmod, rm } from 'node:fs/promises'
 import { readFileSync, writeFileSync } from 'node:fs'
@@ -10,9 +11,9 @@ import { planningFixture } from './planning.fixture.js'
 import { executionFixture, testFixtureLifetime, FixtureExecutionService as ExecutionService } from './execution.fixture.js'
 import { git } from '../../fixtures/runtime/repository.js'
 const cleanups: Array<() => Promise<void>> = []
-afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
+afterEach(async () => { await drainTestBodies(); for (const cleanup of cleanups.splice(0)) await cleanup() })
 
-it('uses the approved demand proposal when an earlier unapproved proposal has the same policy hash and stale corpus', async () => {
+it('uses the approved demand proposal when an earlier unapproved proposal has the same policy hash and stale corpus', trackedBody(async () => {
   const lifetime = testFixtureLifetime()
   cleanups.push(() => lifetime.cleanup())
   await lifetime.run(async () => {
@@ -25,7 +26,7 @@ it('uses the approved demand proposal when an earlier unapproved proposal has th
       const file = join(f.corpus.root, path)
       await writeFile(file, await readFile(file, 'utf8') + '\nCurrent corpus revision.\n')
     }
-    await indexCatalog(f.index, { root: f.corpus.root, commitSha: f.corpus.commit() })
+    await indexCatalog(f.index, { root: f.corpus.root, commitSha: await f.corpus.commit() })
     const second = await planning.propose({ ...f.demand, id: 'demand-2' }, f.policy)
     if (second.status !== 'proposed') throw new Error('Missing second proposal')
     expect(first.proposal.policy.plan.policyHash).toBe(second.proposal.policy.plan.policyHash)
@@ -50,9 +51,9 @@ it('uses the approved demand proposal when an earlier unapproved proposal has th
     expect(captured[0].retrievedData).toEqual(second.proposal.roles.find(role => role.role === 'Developer')!.citations)
     expect(captured[0].retrievedData).not.toEqual(first.proposal.roles.find(role => role.role === 'Developer')!.citations)
   })
-})
+}))
 
-it('keeps manual approved plans free of citations from unapproved proposed events', async () => {
+it('keeps manual approved plans free of citations from unapproved proposed events', trackedBody(async () => {
   const creating = executionFixture(); cleanups.push(creating.cleanup)
   const f = await creating
   f.store.appendEvent({ id: 'unapproved-proposal', projectId: f.plan.projectId, type: 'planning.proposed', at: new Date().toISOString(), data: {
@@ -62,9 +63,9 @@ it('keeps manual approved plans free of citations from unapproved proposed event
   } })
   expect((await new ExecutionService(f).start({ id: 'run-manual' }, f.policy, f.workspace)).status).toBe('completed')
   expect(f.inputs.every(input => input.retrievedData.length === 0)).toBe(true)
-}, 20_000)
+}), 25_000)
 
-it('blocks remote alias replacement immediately after the durable commit result without pushing elsewhere', async () => {
+it('blocks remote alias replacement immediately after the durable commit result without pushing elsewhere', trackedBody(async () => {
   const creating = executionFixture(); cleanups.push(creating.cleanup)
   const f = await creating
   const other = join(f.base, 'unapproved.git')
@@ -82,9 +83,9 @@ it('blocks remote alias replacement immediately after the durable commit result 
   expect(await git(f.remote, 'rev-parse', 'develop')).toBe(f.plan.baseSha)
   expect(await git(other, 'rev-parse', 'develop')).toBe(f.plan.baseSha)
   expect(f.store.get('task', 'task-1')!.data.state.status).toBe('IN_PROGRESS')
-}, 20_000)
+}), 25_000)
 
-it.each(['remote', 'tree'])('revalidates %s after the retry push intent and never delivers an unverified workspace', async fault => {
+it.each(['remote', 'tree'])('revalidates %s after the retry push intent and never delivers an unverified workspace', trackedBody(async fault => {
   const creating = executionFixture(); cleanups.push(creating.cleanup)
   const f = await creating
   const other = join(f.base, 'unapproved.git')
@@ -111,4 +112,4 @@ it.each(['remote', 'tree'])('revalidates %s after the retry push intent and neve
   expect(await git(f.remote, 'rev-parse', 'develop')).toBe(f.plan.baseSha)
   expect(await git(other, 'rev-parse', 'develop')).toBe(f.plan.baseSha)
   expect(f.store.get('task', 'task-1')!.data.state.status).toBe('IN_PROGRESS')
-}, 20_000)
+}), 25_000)

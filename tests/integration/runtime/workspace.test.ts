@@ -1,14 +1,13 @@
+import { trackedBody, drainTestBodies } from '../../fixtures/runtime/test-lifetime.js'
 import { afterEach, describe, expect, it } from 'vitest'
 import { appendFile, link, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { approvePolicy, preparePolicy, inspectRepository, createWorkspace, acquireWriter, verifyWorkspace, inventoryInstructions, verifyInstructions, assertInstructionSources, buildPermissionConfig, requirePermissionProfile } from '../../../packages/runtime/src/index.js'
-import { git, repository } from '../../fixtures/runtime/repository.js'
+import { fixtureExecFile, git, repository } from '../../fixtures/runtime/repository.js'
 const roots: string[] = []
-afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
+afterEach(async () => { await drainTestBodies(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 async function setup() {
   const f = await repository(); roots.push(f.base)
   const repo = await inspectRepository(f.source, 'origin')
@@ -17,7 +16,7 @@ async function setup() {
   return { ...f, repo, policy }
 }
 describe('exclusive repository workspace', () => {
-  it('clones at approved revision without shared Git state and rejects a second writer or clone', async () => {
+  it('clones at approved revision without shared Git state and rejects a second writer or clone', trackedBody(async () => {
     const f = await setup(), workspace = await createWorkspace(f.policy)
     try {
       expect(await git(f.workspaceRoot, 'rev-parse', 'HEAD')).toBe(f.plan.baseSha)
@@ -30,8 +29,8 @@ describe('exclusive repository workspace', () => {
       await expect(verifyWorkspace(f.policy, workspace, { taskId: 'task-1', expectedSha: f.plan.baseSha })).resolves.toEqual(['src/main.ts'])
     } finally { await workspace.release() }
     const writer = await acquireWriter(workspace.repository, f.state); await writer.release(); await writer.release()
-  })
-  it('refuses dirty source, changed branch/SHA/remote, out-of-scope untracked/ignored files and renames', async () => {
+  }))
+  it('refuses dirty source, changed branch/SHA/remote, out-of-scope untracked/ignored files and renames', trackedBody(async () => {
     const f = await setup(); await appendFile(join(f.source, 'src/main.ts'), '// dirty\n')
     await expect(createWorkspace(f.policy)).rejects.toMatchObject({ code: 'DIRTY_REPOSITORY' })
     await git(f.source, 'checkout', '--', 'src/main.ts')
@@ -49,8 +48,8 @@ describe('exclusive repository workspace', () => {
       await git(f.workspaceRoot, 'remote', 'set-url', 'origin', join(f.base, 'other.git'))
       await expect(verifyWorkspace(f.policy, workspace, { expectedSha: f.plan.baseSha })).rejects.toThrow()
     } finally { await workspace.release() }
-  })
-  it('refuses linked targets, unsafe Git config and ambiguous push destinations', async () => {
+  }))
+  it('refuses linked targets, unsafe Git config and ambiguous push destinations', trackedBody(async () => {
     const f = await setup(); await symlink(f.source, f.workspaceRoot)
     await expect(createWorkspace(f.policy)).rejects.toThrow()
     await git(f.source, 'config', 'remote.origin.pushurl', '/different')
@@ -58,10 +57,10 @@ describe('exclusive repository workspace', () => {
     await git(f.source, 'config', '--unset', 'remote.origin.pushurl')
     await git(f.source, 'config', 'core.fsmonitor', 'touch should-never-run')
     await expect(inspectRepository(f.source, 'origin')).rejects.toMatchObject({ code: 'UNSAFE_GIT_CONFIG' })
-  })
+  }))
 })
 describe('instruction trust and least privilege', () => {
-  it('treats persona injection as data; inventories all autoload sources and binds explicit trust to content', async () => {
+  it('treats persona injection as data; inventories all autoload sources and binds explicit trust to content', trackedBody(async () => {
     const f = await setup(), workspace = await createWorkspace(f.policy)
     try {
       expect(await inventoryInstructions(f.workspaceRoot)).toEqual([])
@@ -78,8 +77,8 @@ describe('instruction trust and least privilege', () => {
       await appendFile(join(f.workspaceRoot, 'AGENTS.md'), '\nchanged')
       await expect(verifyInstructions(trusted)).rejects.toThrow()
     } finally { await workspace.release() }
-  })
-  it('blocks project config/skills loading and refuses instruction aliases', async () => {
+  }))
+  it('blocks project config/skills loading and refuses instruction aliases', trackedBody(async () => {
     const f = await setup(), workspace = await createWorkspace(f.policy)
     try {
       await mkdir(join(f.workspaceRoot, '.codex')); await writeFile(join(f.workspaceRoot, '.codex/config.toml'), 'approval_policy="never"')
@@ -90,8 +89,8 @@ describe('instruction trust and least privilege', () => {
       await symlink(join(f.workspaceRoot, 'docs/persona.md'), join(f.workspaceRoot, 'AGENTS.md'))
       await expect(inventoryInstructions(f.workspaceRoot)).rejects.toThrow()
     } finally { await workspace.release() }
-  })
-  it('generates phase-specific restricted profiles and blocks unavailable profiles without fallback', async () => {
+  }))
+  it('generates phase-specific restricted profiles and blocks unavailable profiles without fallback', trackedBody(async () => {
     const f = await setup(), workspace = await createWorkspace(f.policy)
     try {
       const runtimeHome = join(f.base, 'runtime')
@@ -104,16 +103,16 @@ describe('instruction trust and least privilege', () => {
       for (const profiles of [[], [{ id: edit.name, description: null, allowed: false }], [{ id: ':workspace', description: null, allowed: true }]])
         expect(() => requirePermissionProfile(edit.name, profiles)).toThrow()
     } finally { await workspace.release() }
-  })
+  }))
 })
 
 describe('fail-closed regression boundaries', () => {
-  it('refuses executable Git upload-pack config before cloning', async () => {
+  it('refuses executable Git upload-pack config before cloning', trackedBody(async () => {
     const f = await setup()
     await git(f.source, 'config', 'uploadpack.packObjectsHook', 'touch should-never-run')
     await expect(inspectRepository(f.source, 'origin')).rejects.toMatchObject({ code: 'UNSAFE_GIT_CONFIG' })
-  })
-  it('binds lock contents as well as inode and detects replacement without deleting the replacement', async () => {
+  }))
+  it('binds lock contents as well as inode and detects replacement without deleting the replacement', trackedBody(async () => {
     const f = await setup(), workspace = await createWorkspace(f.policy)
     const lock = join(workspace.repository.commonDir, 'ioteams-writer.lock')
     const original = await readFile(lock, 'utf8')
@@ -125,8 +124,8 @@ describe('fail-closed regression boundaries', () => {
     await rm(lock); await writeFile(lock, 'replacement')
     await expect(writer.release()).rejects.toMatchObject({ code: 'WRITER_CHANGED' })
     expect(await readFile(lock, 'utf8')).toBe('replacement')
-  })
-  it('refuses permission grants when a scoped subtree contains hardlinks or excluded symlink directories', async () => {
+  }))
+  it('refuses permission grants when a scoped subtree contains hardlinks or excluded symlink directories', trackedBody(async () => {
     const f = await setup(), workspace = await createWorkspace(f.policy)
     try {
       await link(join(f.source, 'src/main.ts'), join(f.workspaceRoot, 'src/linked.ts'))
@@ -135,8 +134,8 @@ describe('fail-closed regression boundaries', () => {
       await symlink(f.source, join(f.workspaceRoot, 'src/node_modules'))
       await expect(buildPermissionConfig(f.policy, { taskId: 'task-1', phase: 'implement', runtimeHome: join(f.base, 'runtime') })).rejects.toMatchObject({ code: 'UNSAFE_PATH' })
     } finally { await workspace.release() }
-  })
-  it('refuses stale source SHA, active source writer and ancestor autoload configuration', async () => {
+  }))
+  it('refuses stale source SHA, active source writer and ancestor autoload configuration', trackedBody(async () => {
     const f = await setup()
     const sourceWriter = await acquireWriter(f.repo, f.state)
     await expect(createWorkspace(f.policy)).rejects.toMatchObject({ code: 'WORKSPACE_BUSY' })
@@ -147,8 +146,8 @@ describe('fail-closed regression boundaries', () => {
     await writeFile(join(f.source, 'src/main.ts'), 'new revision')
     await git(f.source, 'add', 'src'); await git(f.source, 'commit', '-m', 'moved')
     await expect(createWorkspace(f.policy)).rejects.toMatchObject({ code: 'REPOSITORY_CHANGED' })
-  })
-  it('checks ignored files, deletion, staged changes and commits against the expected revision', async () => {
+  }))
+  it('checks ignored files, deletion, staged changes and commits against the expected revision', trackedBody(async () => {
     const f = await setup(), workspace = await createWorkspace(f.policy)
     try {
       await writeFile(join(f.workspaceRoot, '.git/info/exclude'), 'hidden.txt\n')
@@ -163,10 +162,10 @@ describe('fail-closed regression boundaries', () => {
       await expect(verifyWorkspace(f.policy, workspace, { taskId: 'task-1', expectedSha: head, clean: true })).resolves.toEqual(['src/main.ts'])
     } finally { await workspace.release() }
     await expect(verifyWorkspace(f.policy, workspace, { expectedSha: f.plan.baseSha })).rejects.toMatchObject({ code: 'WRITER_RELEASED' })
-  })
+  }))
 })
 
-it('refuses committed out-of-scope changes even when the caller knows the new SHA', async () => {
+it('refuses committed out-of-scope changes even when the caller knows the new SHA', trackedBody(async () => {
   const f = await setup(), workspace = await createWorkspace(f.policy)
   try {
     await writeFile(join(f.workspaceRoot, 'docs/persona.md'), 'unexpected commit')
@@ -174,17 +173,17 @@ it('refuses committed out-of-scope changes even when the caller knows the new SH
     const head = await git(f.workspaceRoot, 'rev-parse', 'HEAD')
     await expect(verifyWorkspace(f.policy, workspace, { taskId: 'task-1', expectedSha: head })).rejects.toMatchObject({ code: 'OUT_OF_SCOPE' })
   } finally { await workspace.release() }
-})
+}))
 
-it('applies one writer across processes even with a different state directory', async () => {
+it('applies one writer across processes even with a different state directory', trackedBody(async () => {
   const f = await setup(), workspace = await createWorkspace(f.policy)
   try {
     const otherState = join(f.base, 'other-state'); await mkdir(otherState, { mode: 0o700 })
-    const child = promisify(execFile)(process.execPath, ['--import', createRequire(import.meta.url).resolve('tsx'), fileURLToPath(new URL('../../fixtures/runtime/writer.ts', import.meta.url)), f.workspaceRoot, otherState], { cwd: fileURLToPath(new URL('../../../', import.meta.url)), env: { PATH: process.env.PATH, HOME: f.base }, timeout: 5000 })
+    const child = fixtureExecFile(process.execPath, ['--import', createRequire(import.meta.url).resolve('tsx'), fileURLToPath(new URL('../../fixtures/runtime/writer.ts', import.meta.url)), f.workspaceRoot, otherState], { cwd: fileURLToPath(new URL('../../../', import.meta.url)), encoding: 'utf8', env: { PATH: process.env.PATH, HOME: f.base }, timeout: 5000 })
     await expect(child).rejects.toMatchObject({ code: 2, stdout: 'WORKSPACE_BUSY\n' })
   } finally { await workspace.release() }
-})
-it('rejects linked Git metadata, alternate object stores and existing native Git locks', async () => {
+}), 15_000)
+it('rejects linked Git metadata, alternate object stores and existing native Git locks', trackedBody(async () => {
   const f = await setup()
   const metadata = join(f.source, '.git/info/exclude'), outside = join(f.base, 'outside-exclude')
   await writeFile(outside, 'secret.txt\n'); await rm(metadata); await symlink(outside, metadata)
@@ -195,26 +194,26 @@ it('rejects linked Git metadata, alternate object stores and existing native Git
   await rm(join(f.source, '.git/objects/info/alternates'))
   await writeFile(join(f.source, '.git/index.lock'), 'native operation')
   await expect(createWorkspace(f.policy)).rejects.toMatchObject({ code: 'WORKSPACE_BUSY' })
-})
+}))
 
-it('requires an initialized private runtime before constructing grants and refuses temp aliases', async () => {
+it('requires an initialized private runtime before constructing grants and refuses temp aliases', trackedBody(async () => {
   const f = await setup(), workspace = await createWorkspace(f.policy)
   try {
     await expect(buildPermissionConfig(f.policy, { taskId: 'task-1', phase: 'implement', runtimeHome: join(f.base, 'unowned-runtime') })).rejects.toThrow()
     await rm(join(f.runtimeHome, 'tmp'), { recursive: true }); await symlink(f.source, join(f.runtimeHome, 'tmp'))
     await expect(buildPermissionConfig(f.policy, { taskId: 'task-1', phase: 'implement', runtimeHome: f.runtimeHome })).rejects.toThrow()
   } finally { await workspace.release() }
-})
+}))
 
-it('rejects unknown controls in permission and workspace options', async () => {
+it('rejects unknown controls in permission and workspace options', trackedBody(async () => {
   const f = await setup(), workspace = await createWorkspace(f.policy)
   try {
     await expect(buildPermissionConfig(f.policy, { taskId: 'task-1', phase: 'implement', runtimeHome: f.runtimeHome, network: true } as never)).rejects.toThrow()
     await expect(verifyWorkspace(f.policy, workspace, { expectedSha: f.plan.baseSha, allowedPaths: ['docs'] } as never)).rejects.toThrow()
   } finally { await workspace.release() }
-})
+}))
 
-it('inventories instruction and config names with alternate casing on macOS filesystems', async () => {
+it('inventories instruction and config names with alternate casing on macOS filesystems', trackedBody(async () => {
   const f = await setup(), workspace = await createWorkspace(f.policy)
   try {
     await writeFile(join(f.workspaceRoot, 'agents.md'), 'alternate casing injection')
@@ -225,9 +224,9 @@ it('inventories instruction and config names with alternate casing on macOS file
     expect(await inventoryInstructions(f.workspaceRoot)).toHaveLength(1)
     await expect(verifyInstructions(f.policy)).rejects.toMatchObject({ code: 'UNTRUSTED_INSTRUCTIONS' })
   } finally { await workspace.release() }
-})
+}))
 
-it('checks every intermediate commit even when changes are later reverted', async () => {
+it('checks every intermediate commit even when changes are later reverted', trackedBody(async () => {
   const f = await setup(), workspace = await createWorkspace(f.policy)
   try {
     for (const value of ['first source change', 'second source change']) {
@@ -244,22 +243,22 @@ it('checks every intermediate commit even when changes are later reverted', asyn
     head = await git(f.workspaceRoot, 'rev-parse', 'HEAD')
     await expect(verifyWorkspace(f.policy, workspace, { taskId: 'task-1', expectedSha: head })).rejects.toMatchObject({ code: 'OUT_OF_SCOPE' })
   } finally { await workspace.release() }
-})
+}))
 
 
-it('retains the original writer for the entire demand across roots and processes', async () => {
+it('retains the original writer for the entire demand across roots and processes', trackedBody(async () => {
   const f = await setup(), workspace = await createWorkspace(f.policy)
   try {
     const draft = await preparePolicy({ plan: f.plan, repository: f.repo, workspaceRoot: join(f.base, 'second-checkout'), trustedInstructions: [] })
     const second = await approvePolicy(draft, draft.plan.policyHash, f.state)
     await expect(createWorkspace(second)).rejects.toMatchObject({ code: 'WORKSPACE_BUSY' })
-    const child = promisify(execFile)(process.execPath, ['--import', createRequire(import.meta.url).resolve('tsx'), fileURLToPath(new URL('../../fixtures/runtime/writer.ts', import.meta.url)), f.source, f.state], { cwd: fileURLToPath(new URL('../../../', import.meta.url)), env: { PATH: process.env.PATH, HOME: f.base }, timeout: 5000 })
+    const child = fixtureExecFile(process.execPath, ['--import', createRequire(import.meta.url).resolve('tsx'), fileURLToPath(new URL('../../fixtures/runtime/writer.ts', import.meta.url)), f.source, f.state], { cwd: fileURLToPath(new URL('../../../', import.meta.url)), encoding: 'utf8', env: { PATH: process.env.PATH, HOME: f.base }, timeout: 5000 })
     await expect(child).rejects.toMatchObject({ code: 2, stdout: 'WORKSPACE_BUSY\n' })
   } finally { await workspace.release(); await workspace.release() }
   const sourceWriter = await acquireWriter(f.repo, f.state); await sourceWriter.release()
-})
+}))
 
-it('detects merge resolution outside scope even when a second merge restores it', async () => {
+it('detects merge resolution outside scope even when a second merge restores it', trackedBody(async () => {
   const f = await setup(), workspace = await createWorkspace(f.policy)
   try {
     const original = await readFile(join(f.workspaceRoot, 'docs/persona.md'), 'utf8')
@@ -277,9 +276,9 @@ it('detects merge resolution outside scope even when a second merge restores it'
     const head = await git(f.workspaceRoot, 'rev-parse', 'HEAD')
     await expect(verifyWorkspace(f.policy, workspace, { taskId: 'task-1', expectedSha: head, clean: true })).rejects.toMatchObject({ code: 'OUT_OF_SCOPE' })
   } finally { await workspace.release() }
-})
+}))
 
-it('checks staged paths even when the worktree restores the original bytes', async () => {
+it('checks staged paths even when the worktree restores the original bytes', trackedBody(async () => {
   const f = await setup(), workspace = await createWorkspace(f.policy)
   try {
     const original = await readFile(join(f.workspaceRoot, 'docs/persona.md'), 'utf8')
@@ -288,4 +287,4 @@ it('checks staged paths even when the worktree restores the original bytes', asy
     await writeFile(join(f.workspaceRoot, 'docs/persona.md'), original)
     await expect(verifyWorkspace(f.policy, workspace, { taskId: 'task-1', expectedSha: f.plan.baseSha })).rejects.toMatchObject({ code: 'OUT_OF_SCOPE' })
   } finally { await workspace.release() }
-})
+}))

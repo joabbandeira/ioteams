@@ -1,3 +1,4 @@
+import { trackedBody, drainTestBodies } from '../../fixtures/runtime/test-lifetime.js'
 import { afterEach, expect, it } from 'vitest'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -5,8 +6,8 @@ import { PlanningService } from '@ioteams/runtime'
 import { createDomainServices } from '../../../apps/server/src/services.js'
 import { planningFixture } from '../runtime/planning.fixture.js'
 const cleanup: (() => Promise<void>)[] = []
-afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
-it('plans an API draft through the real PlanningService, exposes its exact hash and approves only that snapshot', async () => {
+afterEach(async () => { await drainTestBodies(); for (const close of cleanup.splice(0).reverse()) await close() })
+it('plans an API draft through the real PlanningService, exposes its exact hash and approves only that snapshot', trackedBody(async () => {
   const f = await planningFixture(); cleanup.push(() => f.cleanup())
   const directory = join(f.base, 'api-approved'); await mkdir(directory, { mode: 0o700 })
   const service = createDomainServices({ ...f.options, planning: new PlanningService(f.options), planningPolicy: async () => f.policy, policyDirectory: directory })
@@ -34,8 +35,8 @@ it('plans an API draft through the real PlanningService, exposes its exact hash 
   expect(f.inputs).toHaveLength(3)
   await expect(service.execute({ resource: 'demands', id: draft.id, action: 'plan', body: { expectedVersion: demand.version, teamId, requirements } }, signal)).rejects.toThrow()
   expect(f.inputs).toHaveLength(3)
-})
-it('makes competency gaps visible without creating a proposal, task or native session', async () => {
+}))
+it('makes competency gaps visible without creating a proposal, task or native session', trackedBody(async () => {
   const f = await planningFixture(); cleanup.push(() => f.cleanup())
   const service = createDomainServices({ ...f.options, planning: new PlanningService(f.options), planningPolicy: async () => f.policy })
   cleanup.push(() => service.close!())
@@ -47,4 +48,4 @@ it('makes competency gaps visible without creating a proposal, task or native se
   await service.execute({ resource: 'demands', id: draft.id, action: 'plan', body: { expectedVersion: 1, teamId, requirements } }, signal)
   await expect.poll(() => service.read('planningStatus', draft.id, {})).toMatchObject({ status: 'needs_competency', gaps: [{ competencyId: 'swift' }] })
   expect(f.inputs).toEqual([]); expect(f.store.list('task')).toEqual([])
-})
+}))

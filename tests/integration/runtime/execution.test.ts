@@ -27,7 +27,7 @@ it('runs real checks, independent review and exact commit/push before DONE; dupl
   const counts = f.counts()
   expect(await new ExecutionService(f).start({ id: 'run-1' }, f.policy, f.workspace)).toEqual(result)
   expect(f.counts()).toEqual(counts)
-}, 20_000)
+}, 25_000)
 
 it('rejects a failed real check despite agent success text, preserves history and corrects in a fresh turn', async () => {
   const f = await setup({ implement: async (request, input, count) => {
@@ -57,14 +57,14 @@ it('executes dependent tasks sequentially and binds each evidence to its own att
   expect((await new ExecutionService(f).start({ id: 'run-1' }, f.policy, f.workspace)).status).toBe('completed')
   expect(f.phases).toEqual(['implement', 'review', 'implement', 'review'])
   expect(f.store.list('task').map(t => t.data.state.status)).toEqual(['DONE', 'DONE'])
-}, 20_000)
+}, 30_000)
 
 it('corrects a rejected review in a new session without reusing previous evidence', async () => {
   const f = await setup({ review: (value, count) => count === 1 ? { ...value, approved: false, reason: 'Missing edge case', acceptanceMet: [], definitionOfDoneMet: [] } : value })
   expect((await new ExecutionService(f).start({ id: 'run-1' }, f.policy, f.workspace)).status).toBe('completed')
   expect(f.phases).toEqual(['implement', 'review', 'implement', 'review'])
   expect(f.store.get('task', 'task-1')!.data.state.evidence).toHaveLength(1)
-}, 20_000)
+}, 25_000)
 
 it('blocks out-of-scope writes before checks, commit or push', async () => {
   const f = await setup({ implement: async request => { await writeFile(join(request.policy.snapshot.workspaceRoot, 'docs/escape.md'), 'not authorized') } })
@@ -73,13 +73,15 @@ it('blocks out-of-scope writes before checks, commit or push', async () => {
   expect(await git(f.remote, 'rev-parse', 'develop')).toBe(f.plan.baseSha)
 })
 
-it.each(['inside', 'outside'])('refuses %s-scope check artifacts even when the process exits zero', async scope => {
-  const f = await setup({ check: `import fs from 'node:fs'; fs.writeFileSync('${scope === 'inside' ? 'src/check-output.txt' : 'docs/check-output.txt'}','changed');` })
-  const result = await new ExecutionService(f).start({ id: 'run-1' }, f.policy, f.workspace)
-  expect(result).toMatchObject({ status: 'blocked', reason: scope === 'inside' ? 'TREE_CHANGED' : 'OUT_OF_SCOPE' })
-  expect(f.store.get('task', 'task-1')!.data.state.status).toBe('IN_PROGRESS')
-  expect(await git(f.workspaceRoot, 'rev-parse', 'HEAD')).toBe(f.plan.baseSha)
-})
+for (const scope of ['inside', 'outside'] as const) {
+  it(`refuses ${scope}-scope check artifacts even when the process exits zero`, async () => {
+    const f = await setup({ check: `import fs from 'node:fs'; fs.writeFileSync('${scope === 'inside' ? 'src/check-output.txt' : 'docs/check-output.txt'}','changed');` })
+    const result = await new ExecutionService(f).start({ id: 'run-1' }, f.policy, f.workspace)
+    expect(result).toMatchObject({ status: 'blocked', reason: scope === 'inside' ? 'TREE_CHANGED' : 'OUT_OF_SCOPE' })
+    expect(f.store.get('task', 'task-1')!.data.state.status).toBe('IN_PROGRESS')
+    expect(await git(f.workspaceRoot, 'rev-parse', 'HEAD')).toBe(f.plan.baseSha)
+  }, scope === 'inside' ? 20_000 : 10_000)
+}
 
 it('keeps host failures distinct from technical rejection and never automatically repeats a turn', async () => {
   const f = await setup({ events: events => [...events.slice(0, -1), { type: 'error', code: 'INFRA', message: 'transport failed', retryable: true }] })

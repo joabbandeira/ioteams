@@ -1,29 +1,33 @@
-import { readdir } from 'node:fs/promises'
-import { spawn } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
-
-const root = fileURLToPath(new URL('..', import.meta.url))
-const requested = process.argv.slice(2)
-if (requested.length > 1 || (requested[0] && !['unit', 'integration'].includes(requested[0]))) {
-  console.error('Uso: npm test ou npm run test:unit/test:integration')
-  process.exit(2)
+import {fileURLToPath} from 'node:url'
+import {readdir} from 'node:fs/promises'
+const root=fileURLToPath(new URL('..',import.meta.url)),args=process.argv.slice(2)
+async function hasTests(directory){
+ try{for(const entry of await readdir(directory,{withFileTypes:true})){
+  if(entry.isDirectory()&&await hasTests(`${directory}/${entry.name}`))return true
+  if(entry.isFile()&&/\.test\.ts$/.test(entry.name))return true
+ }}catch(error){if(error.code!=='ENOENT')throw error}
+ return false
 }
-async function hasTests(directory) {
-  try {
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      if (entry.isDirectory() && await hasTests(`${directory}/${entry.name}`)) return true
-      if (entry.isFile() && /\.test\.ts$/.test(entry.name)) return true
-    }
-    return false
-  } catch (error) { if (error.code === 'ENOENT') return false; throw error }
+const requested=args.length===1&&['unit','integration'].includes(args[0])?[args[0]]:['unit','integration']
+if(!(await Promise.all(requested.map(name=>hasTests(`${root}/tests/${name}`)))).some(Boolean)){
+ for(const name of requested)console.error(`${name}: indisponível (nenhum teste implementado).`)
+ process.exitCode=2
 }
-const directories = []
-for (const subset of requested.length ? requested : ['unit', 'integration']) {
-  if (await hasTests(`${root}/tests/${subset}`)) directories.push(`tests/${subset}`)
-  else console.error(`${subset}: indisponível (nenhum teste implementado).`)
+const {discoverTests,partitionTestFiles,runVitest,shardNames}=process.exitCode?{}:await import('./test-runner.ts')
+let subsets=['unit','integration'],shard
+if(process.exitCode){/* Empty standalone fixture requires no dependency module. */}
+else if(args.length===1&&['unit','integration'].includes(args[0]))subsets=[args[0]]
+else if(args.length===2&&args[0]==='--shard'&&shardNames.includes(args[1]))shard=args[1]
+else if(args.length&&!(args.length===1&&args[0]==='--list-shards')){
+ console.error('Uso: npm test; npm run test:unit/test:integration; npm test -- --shard <core|codex|runtime-execution|runtime-policy|server|cli>; --list-shards')
+ process.exitCode=2
 }
-if (!directories.length) process.exit(2)
-const vitest = fileURLToPath(import.meta.resolve('vitest/vitest.mjs'))
-const child = spawn(process.execPath, [vitest, 'run', ...directories], { cwd: root, stdio: 'inherit' })
-child.on('error', error => { console.error(error.message); process.exitCode = 1 })
-child.on('exit', code => { process.exitCode = code ?? 1 })
+if(!process.exitCode){
+ const files=await discoverTests(root,subsets),groups=partitionTestFiles(files)
+ if(args[0]==='--list-shards')console.log(JSON.stringify(groups,null,2))
+ else{
+  const selected=shard?groups[shard]:files
+  if(!selected.length){console.error('No tests discovered');process.exitCode=2}
+  else{console.error(`Test coverage: ${selected.length}/${files.length} files${shard?`; shard=${shard}`:'; complete suite'}`);process.exitCode=await runVitest(selected,{cwd:root})}
+ }
+}

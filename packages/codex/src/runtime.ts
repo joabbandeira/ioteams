@@ -1,10 +1,12 @@
-import { lstat, mkdir, readdir, readFile, realpath, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readdir, readFile, readlink, realpath, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { CodexHostError } from './errors.js'
+import { isVerifiedExecutable, type VerifiedCodexExecutable } from './executable.js'
 const marker = '.ioteams-runtime.json'
 const fail = () => { throw new CodexHostError('UNSAFE_RUNTIME', 'Runtime deve ser privado, dedicado e separado de checkouts e dados pessoais.') }
 const contains = (root: string, path: string) => path === root || path.startsWith(root + sep)
+const nativeHelpers = new Set(['apply_patch', 'applypatch', 'codex-execve-wrapper', ...process.platform === 'linux' ? ['codex-linux-sandbox'] : []])
 async function canonical(path: string): Promise<string> {
   if (!isAbsolute(path)) return fail()
   try { return await realpath(path) } catch (e) {
@@ -14,7 +16,7 @@ async function canonical(path: string): Promise<string> {
     return join(await canonical(parent), relative(parent, path))
   }
 }
-export interface RuntimeOptions { runtimeHome: string; checkoutRoots: string[]; protectedHomes?: string[] }
+export interface RuntimeOptions { runtimeHome: string; checkoutRoots: string[]; protectedHomes?: string[]; nativeExecutable?: VerifiedCodexExecutable }
 async function checkedPath(options: RuntimeOptions): Promise<string> {
   const path = await canonical(options.runtimeHome)
   // Reject aliases even when they resolve to a task-owned directory.
@@ -28,10 +30,23 @@ async function checkedPath(options: RuntimeOptions): Promise<string> {
   if (path === homedir() || path === sep) fail()
   return path
 }
-async function inspectTree(path: string): Promise<void> {
+async function inspectTree(path: string, root: string, executable?: VerifiedCodexExecutable): Promise<void> {
   const info = await lstat(path)
-  if (info.isSymbolicLink() || info.uid !== process.getuid?.() || (!info.isDirectory() && (!info.isFile() || info.nlink !== 1))) fail()
-  if (info.isDirectory()) for (const name of await readdir(path)) await inspectTree(join(path, name))
+  if (info.uid !== process.getuid?.()) fail()
+  if (info.isSymbolicLink()) {
+    const helper = /^tmp\/arg0\/codex-arg0[a-zA-Z0-9]{6}\/([^/]+)$/.exec(relative(root, path))
+    if (!executable || !helper || !nativeHelpers.has(helper[1]) || await readlink(path) !== executable.path || await realpath(path) !== executable.path) fail()
+    const parent = resolve(path, '..'), lock = await lstat(join(parent, '.lock'))
+    for (const directory of [join(root, 'tmp'), join(root, 'tmp', 'arg0'), parent]) {
+      const stat = await lstat(directory)
+      // Native tempfile uses 0755 for the session, below the mandatory private tmp/arg0 ancestors.
+      if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || stat.mode & (directory === parent ? 0o022 : 0o077)) fail()
+    }
+    if (!lock.isFile() || lock.isSymbolicLink() || lock.nlink !== 1 || lock.uid !== process.getuid?.() || lock.mode & 0o022) fail()
+    return
+  }
+  if (!info.isDirectory() && (!info.isFile() || info.nlink !== 1)) fail()
+  if (info.isDirectory()) for (const name of await readdir(path)) await inspectTree(join(path, name), root, executable)
 }
 export async function initializeRuntimeHome(options: RuntimeOptions): Promise<void> {
   const path = await checkedPath(options)
@@ -46,7 +61,11 @@ export async function initializeRuntimeHome(options: RuntimeOptions): Promise<vo
 export async function validateRuntimeHome(options: RuntimeOptions): Promise<string> {
   const path = await checkedPath(options)
   if (((await lstat(path)).mode & 0o077) !== 0) fail()
-  await inspectTree(path)
+  if (options.nativeExecutable) {
+    if (!isVerifiedExecutable(options.nativeExecutable)) fail()
+    await options.nativeExecutable.assertUnchanged()
+  }
+  await inspectTree(path, path, options.nativeExecutable)
   const owner = JSON.parse(await readFile(join(path, marker), 'utf8'))
   if (owner.application !== 'ioteams' || owner.version !== 1) fail()
   for (const directory of ['home', 'sqlite', 'tmp', 'logs']) if (!(await lstat(join(path, directory))).isDirectory()) fail()

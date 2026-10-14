@@ -1,25 +1,26 @@
+import { trackedBody, drainTestBodies } from '../../fixtures/runtime/test-lifetime.js'
 import { afterEach, expect, it } from 'vitest'
 import { PlanningService, approvePolicy, preparePolicy } from '@ioteams/runtime'
 import { indexCatalog } from '@ioteams/knowledge'
 import { planningFixture } from './planning.fixture.js'
 const fixtures: Awaited<ReturnType<typeof planningFixture>>[] = []
-afterEach(async () => { for (const f of fixtures.splice(0)) await f.cleanup() })
+afterEach(async () => { await drainTestBodies(); for (const f of fixtures.splice(0)) await f.cleanup() })
 async function setup(...args: Parameters<typeof planningFixture>) { const f = await planningFixture(...args); fixtures.push(f); return f }
 
-it('rejects a concurrent demand before either can enter a second external planning sequence', async () => {
+it('rejects a concurrent demand before either can enter a second external planning sequence', trackedBody(async () => {
   const f = await setup(), service = new PlanningService(f.options)
   const first = service.propose(f.demand, f.policy)
   await expect(service.propose({ ...f.demand, id: 'demand-2' }, f.policy)).rejects.toMatchObject({ code: 'PLANNING_BUSY' })
   expect((await first).status).toBe('proposed')
   expect(f.inputs).toHaveLength(3)
-})
-it('does not open a host for an already cancelled request', async () => {
+}))
+it('does not open a host for an already cancelled request', trackedBody(async () => {
   const f = await setup(), abort = new AbortController(); abort.abort()
   await expect(new PlanningService(f.options).propose(f.demand, f.policy, abort.signal)).rejects.toMatchObject({ code: 'PLANNING_INTERRUPTED' })
   expect(f.inputs).toHaveLength(0)
   expect(f.phases).toHaveLength(0)
-})
-it.each(['incomplete', 'failed', 'wrong turn', 'thread reuse', 'tool', 'permission request', 'oversize', 'after terminal'])('fails closed on %s and disposes the host', async fault => {
+}))
+it.each(['incomplete', 'failed', 'wrong turn', 'thread reuse', 'tool', 'permission request', 'oversize', 'after terminal'])('fails closed on %s and disposes the host', trackedBody(async fault => {
   const f = await setup(undefined, events => {
     if (fault === 'incomplete') return events.slice(0, -1)
     if (fault === 'failed') return [...events.slice(0, -1), { type: 'turn.completed', turnId: 'turn-1', status: 'failed' }]
@@ -38,8 +39,8 @@ it.each(['incomplete', 'failed', 'wrong turn', 'thread reuse', 'tool', 'permissi
   expect(f.store.list('run')).toEqual([])
   expect(f.store.list('approvedPlan')).toEqual([])
   expect(f.store.eventsAfter(0).at(-1)?.type).toBe('planning.blocked')
-})
-it('plans two assigned Developers in distinct sessions while keeping each context limited to their slots', async () => {
+}))
+it('plans two assigned Developers in distinct sessions while keeping each context limited to their slots', trackedBody(async () => {
   const f = await setup((_role, value, input) => input.identity.role === 'Developer' ? {
     ...value, tasks: input.approvedPolicy.tasks.filter(t => t.professionalId === input.identity.professionalId),
   } : value)
@@ -49,7 +50,7 @@ it('plans two assigned Developers in distinct sessions while keeping each contex
     {professionalId:'helena-costa',role:'Product Owner'},{professionalId:'marcos-lima',role:'Scrum Master'},
     {professionalId:'bia-martins',role:'Developer'},{professionalId:'caio',role:'Developer'},
   ] })+'\n---\n# LISA\nConhecimento de referência.\n')
-  await indexCatalog(f.index, { root: f.corpus.root, commitSha: f.corpus.commit() })
+  await indexCatalog(f.index, { root: f.corpus.root, commitSha: await f.corpus.commit() })
   const { version: _, ...envelope } = f.policy.snapshot
   const draft = await preparePolicy({ ...envelope, plan: { ...envelope.plan, tasks: [...envelope.plan.tasks,
     { ...envelope.plan.tasks[0], id:'task-2', professionalId:'caio', dependsOn:['task-1'] }] } })
@@ -62,9 +63,9 @@ it('plans two assigned Developers in distinct sessions while keeping each contex
   const devs = f.inputs.filter(i => i.identity.role === 'Developer')
   expect(devs.map(i=>JSON.parse(i.objective).context.slots.map((t: {id:string})=>t.id))).toEqual([['task-1'],['task-2']])
   expect(new Set(result.proposal.roles.map(r=>r.threadId)).size).toBe(4)
-})
+}))
 
-it.each(['team', 'requirements', 'unknown control'])('rejects mismatched %s before consulting a model', async fault => {
+it.each(['team', 'requirements', 'unknown control'])('rejects mismatched %s before consulting a model', trackedBody(async fault => {
   const f = await setup(), input = structuredClone(f.demand) as any
   if (fault === 'team') input.teamId = 'another-team'
   if (fault === 'requirements') input.requirements[0].taskId = 'other-task'
@@ -72,9 +73,9 @@ it.each(['team', 'requirements', 'unknown control'])('rejects mismatched %s befo
   await expect(new PlanningService(f.options).propose(input, f.policy)).rejects.toThrow()
   expect(f.inputs).toHaveLength(0)
   expect(f.store.list('demand')).toEqual([])
-})
+}))
 
-it('does not persist a proposal when cancellation arrives during final session disposal', async () => {
+it('does not persist a proposal when cancellation arrives during final session disposal', trackedBody(async () => {
   const f = await setup(), abort = new AbortController(); let count = 0
   const createHost = async (request: Parameters<typeof f.factory>[0]) => {
     const session = await f.factory(request), number = ++count
@@ -82,9 +83,9 @@ it('does not persist a proposal when cancellation arrives during final session d
   }
   await expect(new PlanningService({ ...f.options, createHost }).propose(f.demand, f.policy, abort.signal)).rejects.toMatchObject({ code: 'PLANNING_INTERRUPTED' })
   expect(f.store.eventsAfter(0).some(e => e.type === 'planning.proposed')).toBe(false)
-})
+}))
 
-it('rejects an index from a different corpus with identical Markdown and an unverifiable revision', async () => {
+it('rejects an index from a different corpus with identical Markdown and an unverifiable revision', trackedBody(async () => {
   const f = await setup()
   const { fixture } = await import('../knowledge/fixtures.js')
   const { openKnowledge } = await import('@ioteams/knowledge')
@@ -95,9 +96,9 @@ it('rejects an index from a different corpus with identical Markdown and an unve
     await expect(new PlanningService({ ...f.options, index }).propose(f.demand, f.policy)).rejects.toMatchObject({ code: 'NO_EVIDENCE' })
     expect(f.inputs).toHaveLength(0)
   } finally { index.close(); await other.cleanup() }
-})
+}))
 
-it('limits recovery terms deterministically while keeping a valid 33-term demand complete', async () => {
+it('limits recovery terms deterministically while keeping a valid 33-term demand complete', trackedBody(async () => {
   const f = await setup()
   const { listCorpusMarkdown } = await import('@ioteams/catalog')
   const { readFile, writeFile } = await import('node:fs/promises')
@@ -107,9 +108,9 @@ it('limits recovery terms deterministically while keeping a valid 33-term demand
     const file = join(f.corpus.root, path)
     await writeFile(file, await readFile(file, 'utf8') + '\n## Demanda\n' + goal + '\n')
   }
-  await indexCatalog(f.index, { root: f.corpus.root, commitSha: f.corpus.commit() })
+  await indexCatalog(f.index, { root: f.corpus.root, commitSha: await f.corpus.commit() })
   const result = await new PlanningService(f.options).propose({ ...f.demand, goal }, f.policy)
   expect(result.status).toBe('proposed')
   expect(f.inputs).toHaveLength(3)
   expect(f.inputs.every(input => JSON.parse(input.objective).demand.goal === goal)).toBe(true)
-})
+}))

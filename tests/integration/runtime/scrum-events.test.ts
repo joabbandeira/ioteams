@@ -1,10 +1,11 @@
+import { trackedBody, drainTestBodies } from '../../fixtures/runtime/test-lifetime.js'
 import { afterEach, expect, it } from 'vitest'
 import { ScrumEventService, PlanningService } from '@ioteams/runtime'
 import { planningFixture } from './planning.fixture.js'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 const fixtures: Awaited<ReturnType<typeof planningFixture>>[] = []
-afterEach(async () => { for (const f of fixtures.splice(0)) await f.cleanup() })
+afterEach(async () => { await drainTestBodies(); for (const f of fixtures.splice(0)) await f.cleanup() })
 async function setup() {
   const f = await planningFixture(); fixtures.push(f)
   const planning = new PlanningService(f.options), result = await planning.propose(f.demand, f.policy)
@@ -18,7 +19,7 @@ async function setup() {
       participants: result.proposal.team.members, stakeholderIds: [], evidenceIds: [],
       observations: ['Sem incremento concluído ainda'], improvements: ['Rever a clareza da aceitação'], at: '2026-10-14T11:00:00Z' } }
 }
-it('records Planning, Daily, Review and Retrospective with purpose, participants, evidence and improvement without changing authority', async () => {
+it('records Planning, Daily, Review and Retrospective with purpose, participants, evidence and improvement without changing authority', trackedBody(async () => {
   const f = await setup()
   const planning = f.service.sprintPlanning(f.input)
   const daily = f.service.inspectDaily({ ...f.input, id: 'event-2', participants: f.input.participants.filter(p => p.role === 'Developer') })
@@ -35,8 +36,8 @@ it('records Planning, Daily, Review and Retrospective with purpose, participants
   expect(f.service.sprintPlanning(f.input)).toEqual(planning)
   expect(f.store.eventsAfter(0).filter(e => e.type === 'scrum.sprint_planning')).toHaveLength(1)
   expect(() => f.service.sprintPlanning({ ...f.input, purpose: 'Outro efeito' })).toThrow()
-})
-it.each(['foreign participant', 'false role', 'invented evidence', 'empty improvement', 'extra control', 'unknown sprint', 'missing team member'])('refuses %s without storing a Scrum event', async kind => {
+}))
+it.each(['foreign participant', 'false role', 'invented evidence', 'empty improvement', 'extra control', 'unknown sprint', 'missing team member'])('refuses %s without storing a Scrum event', trackedBody(async kind => {
   const f = await setup(), input = structuredClone(f.input) as any
   if (kind === 'foreign participant') input.participants[0].professionalId = 'outsider'
   if (kind === 'false role') input.participants[0].role = 'Scrum Master'
@@ -47,14 +48,14 @@ it.each(['foreign participant', 'false role', 'invented evidence', 'empty improv
   if (kind === 'missing team member') input.participants.pop()
   expect(() => f.service.sprintRetrospective(input)).toThrow()
   expect(f.store.eventsAfter(0).filter(e => e.type.startsWith('scrum.'))).toHaveLength(0)
-})
-it('keeps Daily centered on Developers without delegating work to the facilitator', async () => {
+}))
+it('keeps Daily centered on Developers without delegating work to the facilitator', trackedBody(async () => {
   const f = await setup()
   expect(() => f.service.inspectDaily(f.input)).toThrow()
   expect(f.store.list('task')).toEqual([])
-})
+}))
 
-it('links stored evidence from the same Sprint and rejects future evidence or another Sprint', async () => {
+it('links stored evidence from the same Sprint and rejects future evidence or another Sprint', trackedBody(async () => {
   const f = await setup()
   const { createTask, transitionTask, recordHostEvidence } = await import('@ioteams/core')
   const plan = f.proposal.policy.plan, task = plan.tasks[0]
@@ -74,4 +75,4 @@ it('links stored evidence from the same Sprint and rejects future evidence or an
   expect(() => f.service.sprintReview({ ...f.input, id: 'future-evidence', evidenceIds: ['evidence-1'], at: '2026-10-14T10:03:00Z' })).toThrow()
   f.store.create('sprint', { id: 'another-sprint', projectId: f.input.projectId, planId: plan.id, goal: f.proposal.sprintGoal, definitionOfDone: f.proposal.definitionOfDone })
   expect(() => f.service.sprintReview({ ...f.input, id: 'wrong-sprint', sprintId: 'another-sprint', evidenceIds: ['evidence-1'] })).toThrow()
-})
+}))

@@ -22,7 +22,8 @@
     "build": "npm run build --workspaces --if-present",
     "build:demo": "npm run build:demo --workspace painel",
     "preview": "node scripts/preview.mjs",
-    "browser:install": "PLAYWRIGHT_BROWSERS_PATH=0 playwright install chromium"
+    "browser:install": "PLAYWRIGHT_BROWSERS_PATH=0 playwright install chromium",
+    "cli": "node --import tsx apps/cli/src/main.ts"
   },
   "devDependencies": {
     "@playwright/test": "1.64.0",

@@ -1,3 +1,4 @@
+import { trackedBody, drainTestBodies } from '../../fixtures/runtime/test-lifetime.js'
 import { afterEach, expect, it } from 'vitest'
 import { chmod, copyFile, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -7,9 +8,9 @@ import { HostTurnInputSchema } from '@ioteams/core'
 import { turn } from '../../fixtures/contracts.js'
 import { verifyNativeExecutable, guardNativeApprovals } from '../../../apps/server/src/native.js'
 const roots: string[] = []
-afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
+afterEach(async () => { await drainTestBodies(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 async function setup() { const root = await realpath(await mkdtemp(join(tmpdir(), 'ioteams-native-api-'))); roots.push(root); return root }
-it('requires a canonical native executable outside served checkouts and binds its bytes across uses', async () => {
+it('requires a canonical native executable outside served checkouts and binds its bytes across uses', trackedBody(async () => {
   const root = await setup(), checkout = join(root, 'checkout'); await mkdir(checkout)
   const file = join(root, 'tool'); await copyFile(await realpath('/usr/bin/true'), file); await chmod(file, 0o700)
   const verified = await verifyNativeExecutable(file, [checkout])
@@ -20,15 +21,15 @@ it('requires a canonical native executable outside served checkouts and binds it
   await expect(verifyNativeExecutable(alias, [checkout])).rejects.toMatchObject({ code: 'UNSAFE_EXECUTABLE' })
   await copyFile('/usr/bin/true', join(checkout, 'tool')); await chmod(join(checkout, 'tool'), 0o700)
   await expect(verifyNativeExecutable(join(checkout, 'tool'), [checkout])).rejects.toMatchObject({ code: 'UNSAFE_EXECUTABLE' })
-})
-it('rejects scripts and writable executables rather than discovering a repo PATH entry', async () => {
+}))
+it('rejects scripts and writable executables rather than discovering a repo PATH entry', trackedBody(async () => {
   const root = await setup(), script = join(root, 'codex')
   await writeFile(script, '#!/bin/sh\nexit 0\n', { mode: 0o700 })
   await expect(verifyNativeExecutable(script, [])).rejects.toMatchObject({ code: 'UNSAFE_EXECUTABLE' })
   await copyFile('/usr/bin/true', script); await chmod(script, 0o777)
   await expect(verifyNativeExecutable(script, [])).rejects.toMatchObject({ code: 'UNSAFE_EXECUTABLE' })
-})
-it('fails closed on native accept until the adapter policy guard is available, while preserving decline', async () => {
+}))
+it('fails closed on native accept until the adapter policy guard is available, while preserving decline', trackedBody(async () => {
   const raw = new FakeHostAdapter([
     { type: 'thread.started', threadId: 't1' }, { type: 'turn.started', threadId: 't1', turnId: 'turn1' },
     { type: 'approval.requested', request: { id: 'a1', runId: 'run-1', threadId: 't1', turnId: 'turn1', requestId: 'req1', kind: 'permissions', summary: 'Grant', details: { network: true }, status: 'pending' } },
@@ -41,8 +42,8 @@ it('fails closed on native accept until the adapter policy guard is available, w
   await host.respondToApproval('req1', 'decline')
   expect((await stream.next()).value.type).toBe('turn.completed')
   await stream.return?.()
-})
-it('refuses a check runtime inside a served checkout before creating any artifacts', async () => {
+}))
+it('refuses a check runtime inside a served checkout before creating any artifacts', trackedBody(async () => {
   const { createNativeFactories } = await import('../../../apps/server/src/native.js')
   const { repository } = await import('../../fixtures/runtime/repository.js')
   const { approvePolicy, preparePolicy, inspectRepository } = await import('@ioteams/runtime')
@@ -55,4 +56,4 @@ it('refuses a check runtime inside a served checkout before creating any artifac
     runtimeHome: join(f.base, 'runtime'), checkRuntimeRoot: root, searchPath: [] })
   await expect(factories.createCheckSandbox({ policy, taskId: f.plan.tasks[0].id })).rejects.toThrow()
   expect(await readdir(root)).toEqual([])
-})
+}))

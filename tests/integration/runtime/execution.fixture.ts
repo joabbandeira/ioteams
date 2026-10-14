@@ -1,4 +1,3 @@
-import { getCurrentTest, type Test } from '@vitest/runner'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { FakeHostAdapter } from '@ioteams/codex'
@@ -7,34 +6,34 @@ import { createTask, type HostAdapter, type HostEvent, type HostTurnInput } from
 import { ExecutionService, approvePolicy, createWorkspace, inspectRepository, preparePolicy, type ExecutionHostRequest, type CheckSandbox } from '@ioteams/runtime'
 import { sha256 } from '../../../packages/runtime/src/policy.js'
 import { FixtureLifetime, fixtureExecFile, git, repository } from '../../fixtures/runtime/repository.js'
-let fixtureNumber = 0
-// Register teardown before awaiting setup, including setup that never returns
-// to its test after a Vitest timeout. The context signal is Vitest's public API.
-export function testFixtureLifetime(signal?: AbortSignal) {
-  const test = getCurrentTest<Test | undefined>()
-  const id = ++fixtureNumber
-  const observer = process.env.IOTEAMS_FIXTURE_TIMINGS === '1' ? (phase: string, ms: number, outcome: string) => {
-    console.error('[fixture-timing]', JSON.stringify({ pid: process.pid, id, test: test?.name, phase, ms: Math.round(ms), outcome }))
-  } : undefined
-  const lifetime = new FixtureLifetime(signal ?? test?.context.signal, observer)
-  test?.context.onTestFinished(() => lifetime.cleanup())
-  return lifetime
-}
+import { testFixtureLifetime } from '../../fixtures/runtime/test-lifetime.js'
+export { testFixtureLifetime } from '../../fixtures/runtime/test-lifetime.js'
 export class FixtureExecutionService extends ExecutionService {
   private readonly lifetime: FixtureLifetime
+  private readonly retainedSignals = new Set<{ signal: AbortSignal }>()
+  private retainIncoming<T>(signal: AbortSignal | undefined, work: Promise<T>): Promise<T> {
+    if (!signal) return work
+    // Node24.6 may lose sources of later composites when an intermediate is GC'd.
+    // A distinct owner keeps overlapping operations from releasing each other.
+    const owner = { signal }
+    this.retainedSignals.add(owner)
+    return work.finally(() => { this.retainedSignals.delete(owner) })
+  }
   constructor(options: ConstructorParameters<typeof ExecutionService>[0] & { lifetime?: FixtureLifetime }) {
     super(options)
     this.lifetime = options.lifetime ?? testFixtureLifetime()
   }
   override start(...args: Parameters<ExecutionService['start']>) {
     this.lifetime.assertActive()
-    args[3] = args[3] ? AbortSignal.any([args[3], this.lifetime.signal]) : this.lifetime.signal
-    return this.lifetime.run(() => super.start(...args), 'start')
+    const incoming = args[3]
+    args[3] = incoming ? AbortSignal.any([incoming, this.lifetime.signal]) : this.lifetime.signal
+    return this.retainIncoming(incoming, this.lifetime.run(() => super.start(...args), 'start'))
   }
   override resume(...args: Parameters<ExecutionService['resume']>) {
     this.lifetime.assertActive()
-    args[3] = args[3] ? AbortSignal.any([args[3], this.lifetime.signal]) : this.lifetime.signal
-    return this.lifetime.run(() => super.resume(...args), 'resume')
+    const incoming = args[3]
+    args[3] = incoming ? AbortSignal.any([incoming, this.lifetime.signal]) : this.lifetime.signal
+    return this.retainIncoming(incoming, this.lifetime.run(() => super.resume(...args), 'resume'))
   }
   override reconcile(...args: Parameters<ExecutionService['reconcile']>) {
     this.lifetime.assertActive()

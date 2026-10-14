@@ -1,4 +1,4 @@
-import { execFile, type ExecFileOptionsWithStringEncoding } from 'node:child_process'
+import { execFile, spawn, type ExecFileOptionsWithStringEncoding, type SpawnOptions } from 'node:child_process'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -8,6 +8,7 @@ import type { ExecutionPlan } from '@ioteams/core'
 // Test-owned lifetimes never affect production Git or process-wide state.
 const fixtureContext = new AsyncLocalStorage<FixtureLifetime>()
 const fixtureRoots = new Map<string, FixtureLifetime>()
+export const currentFixtureLifetime = () => fixtureContext.getStore()
 export class FixtureLifetime {
   readonly controller = new AbortController()
   readonly signal: AbortSignal
@@ -69,16 +70,30 @@ export function fixtureExecFile(file: string, args: string[], options: ExecFileO
   }
   return lifetime ? lifetime.run(execute) : execute()
 }
+export function fixtureSpawn(file:string,args:string[],options:SpawnOptions={}){
+  const lifetime=fixtureContext.getStore(),signal=lifetime?(options.signal?AbortSignal.any([lifetime.signal,options.signal]):lifetime.signal):options.signal
+  signal?.throwIfAborted()
+  const child=spawn(file,args,{...options,signal})
+  let failure:Error|undefined
+  child.once('error',error=>{failure=error})
+  child.stdin?.once('error',error=>{failure??=error})
+  const closure=new Promise<void>(resolve=>child.once('close',()=>resolve()))
+  const closed=lifetime?lifetime.run(()=>closure,'child-close'):closure
+  return {child,closed,failure:()=>failure}
+}
 export async function git(cwd: string, ...args: string[]) {
   return (await fixtureExecFile('git', args, { encoding: 'utf8', cwd, env: { PATH: process.env.PATH, HOME: cwd, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' } })).stdout.trim()
 }
-export async function repository() {
-  const base = await mkdtemp(join(await realpath(tmpdir()), 'ioteams-t11-'))
+export async function repository(options: { afterRootCreated?(base: string): Promise<void> } = {}) {
   const lifetime = fixtureContext.getStore()
+  lifetime?.assertActive()
+  const base = await mkdtemp(join(await realpath(tmpdir()), 'ioteams-t11-'))
   if (lifetime) {
     fixtureRoots.set(base, lifetime)
     lifetime.defer(async () => { await rm(base, { recursive: true, force: true }); fixtureRoots.delete(base) })
   }
+  await options.afterRootCreated?.(base)
+  lifetime?.assertActive()
   const source = join(base, 'source'), remote = join(base, 'remote.git'), workspaceRoot = join(base, 'checkout'), state = join(base, 'state')
   await mkdir(source); await mkdir(state, { mode: 0o700 })
   await git(source, 'init', '-b', 'develop')

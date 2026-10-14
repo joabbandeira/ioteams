@@ -91,3 +91,18 @@ O protótipo do time LISA permite discutir essa organização visualmente. Seus 
 ## Referências conceituais
 
 As regras do framework têm como referência o [Scrum Guide 2020](https://scrumguides.org/scrum-guide.html). A distinção entre base documental e recuperação para geração utiliza o [trabalho original sobre RAG](https://arxiv.org/abs/2005.11401). As convenções de composição, documentação e visualização descritas nesta coleção pertencem à concepção do ioteams.
+
+## CLI local
+
+A CLI operacional usa Node 24 e os mesmos serviços/guards da API autenticada.
+Execute `npm run cli -- help` e consulte [Operação da CLI](docs/operacao-cli.md)
+para inicialização privada, diagnóstico/login nativo, canal autenticado,
+planejamento, aprovação, execução e comandos de controle. Efeitos exigem chave
+idempotente e controles exigem a versão atual. Login não copia credenciais;
+indexação offline recusa um produto já reservado pelo servidor.
+
+O bootstrap operacional também é CLI: `policy-propose`, `policy-review` e
+`policy-approve` preparam e aprovam explicitamente o hash do envelope inicial;
+`serve` usa esse binding privado. `status --resource planning --id ID` expõe
+planejamento, lacunas e bloqueios. A documentação inclui os seis shards completos
+para validação com limite de 300 segundos por comando.

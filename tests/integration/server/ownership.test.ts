@@ -1,10 +1,11 @@
+import { trackedBody, drainTestBodies, fixtureRelease, testAwait } from '../../fixtures/runtime/test-lifetime.js'
 import { afterEach, expect, it, vi } from 'vitest'
 import { openStore } from '@ioteams/storage'
 import { openKnowledge } from '@ioteams/knowledge'
 import { createDomainServices } from '../../../apps/server/src/services.js'
 import { executionFixture, FixtureExecutionService as ExecutionService } from '../runtime/execution.fixture.js'
 const cleanup: (() => Promise<void> | void)[] = []
-afterEach(async () => { vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close() })
+afterEach(async () => { await drainTestBodies(); vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close() })
 async function setup(approval = false, guardAt = 1) {
   const id = 'guard-run'
   const creating = executionFixture({ events: (events, phase) => approval && phase === 'implement' ? [...events.slice(0, 2), {
@@ -13,7 +14,7 @@ async function setup(approval = false, guardAt = 1) {
   const f = await creating
   const index = openKnowledge({ memory: true }); cleanup.push(() => index.close())
   let release!: () => void, entered!: () => void, guardCount = 0
-  const held = new Promise<void>(resolve => { release = resolve }), guarding = new Promise<void>(resolve => { entered = resolve })
+  const held = new Promise<void>(resolve => { release = fixtureRelease(resolve) }), guarding = new Promise<void>(resolve => { entered = resolve })
   const workspace = { ...f.workspace, async assertOwned() { if (++guardCount === guardAt) { entered(); await held }; await f.workspace.assertOwned() } }
   const execution = new ExecutionService(f)
   const options = { store: f.store, index, catalogRoot: f.source, execution, executionContext: async () => ({ policy: f.policy, workspace }) }
@@ -22,9 +23,9 @@ async function setup(approval = false, guardAt = 1) {
   const replacement = createDomainServices({ ...options, store: sibling, execution: new ExecutionService({ ...f, store: sibling }) }); cleanup.push(() => replacement.close!())
   return { ...f, options, id, execution, service, replacement, replacementStore: sibling, guarding, release, signal: new AbortController().signal }
 }
-it.each(['pause', 'cancel'] as const)('refuses foreign %s during the real start guard instead of claiming an unconfirmed stop', async action => {
+it.each(['pause', 'cancel'] as const)('refuses foreign %s during the real start guard instead of claiming an unconfirmed stop', trackedBody(async action => {
   const f = await setup()
-  await f.service.execute({ resource: 'runs', body: { id: f.id, planId: f.plan.id } }, f.signal); await f.guarding
+  await f.service.execute({ resource: 'runs', body: { id: f.id, planId: f.plan.id } }, f.signal); await testAwait(f.guarding)
   await expect(f.replacement.execute({ resource: 'runs', id: f.id, action, body: { expectedVersion: 1 } }, f.signal)).rejects.toMatchObject({ code: 'RECONCILIATION_REQUIRED' })
   expect(await f.replacement.read('runs', f.id, {})).toMatchObject({ version: 1, data: { status: 'blocked' } })
   expect(await f.replacement.execute({ resource: 'runs', id: f.id, action: 'reconcile', body: { expectedVersion: 1 } }, f.signal)).toEqual({ id: f.id, status: 'blocked', version: 1, reason: 'RECONCILIATION_REQUIRED' })
@@ -32,34 +33,43 @@ it.each(['pause', 'cancel'] as const)('refuses foreign %s during the real start 
   f.release()
   await expect.poll(() => f.store.get('run', f.id)?.data.status, { timeout: 15_000 }).toBe('completed')
   expect((await f.replacement.read('runs', f.id, {}) as { data: { status: string } }).data.status).toBe('completed')
-}, 20_000)
-it('keeps actual, GET runs and GET status coherent after an owned queued stop, reconciliation and resume', async () => {
+}), 20_000)
+it('keeps actual, GET runs and GET status coherent after an owned queued stop, reconciliation and resume', trackedBody(async () => {
   const f = await setup(true)
-  await f.service.execute({ resource: 'runs', body: { id: f.id, planId: f.plan.id } }, f.signal); await f.guarding
+  await f.service.execute({ resource: 'runs', body: { id: f.id, planId: f.plan.id } }, f.signal); await testAwait(f.guarding)
   expect(await f.service.execute({ resource: 'runs', id: f.id, action: 'cancel', body: { expectedVersion: 1 } }, f.signal)).toMatchObject({ status: 'cancelled', version: 2 })
   f.release()
   await expect.poll(() => f.store.get('run', f.id)?.data.status).toBe('cancelled')
   expect(f.counts()).toEqual({ implementations: 0, reviews: 0, checks: 0 })
   const version = async () => (await f.service.read('runs', f.id, {}) as { version: number }).version
+  const append=f.store.appendEvent.bind(f.store)
+  const awaitingApproval=new Promise<void>(resolve=>{
+    vi.spyOn(f.store,'appendEvent').mockImplementation(event=>{
+      const stored=append(event)
+      if(event.runId===f.id&&event.type==='execution.status'&&(event.data as {status?:string}).status==='awaiting_approval')resolve()
+      return stored
+    })
+  })
   expect(await f.service.execute({ resource: 'runs', id: f.id, action: 'reconcile', body: { expectedVersion: await version() } }, f.signal)).toMatchObject({ status: 'paused' })
   expect(await f.service.read('runs', f.id, {})).toMatchObject({ data: { status: 'paused' } })
   const actualVersion = f.store.get('run', f.id)!.version
   await f.service.execute({ resource: 'runs', id: f.id, action: 'resume', body: { expectedVersion: await version() } }, f.signal)
+  await testAwait(awaitingApproval)
   await expect.poll(() => f.store.get('run', f.id)?.data.status).toBe('awaiting_approval')
   expect(f.store.get('run', f.id)!.version).toBeGreaterThan(actualVersion)
   expect(await f.service.read('runs', f.id, {})).toMatchObject({ data: { status: 'awaiting_approval' } })
   expect(await f.service.read('runStatus', f.id, {})).toMatchObject({ status: 'awaiting_approval' })
   expect(await f.replacement.read('runs', f.id, {})).toMatchObject({ data: { status: 'awaiting_approval' } })
-})
-it.each(['resume', 'reconcile'] as const)('fences a foreign cancel during the next %s generation before its runtime method proceeds', async action => {
+}))
+it.each(['resume', 'reconcile'] as const)('fences a foreign cancel during the next %s generation before its runtime method proceeds', trackedBody(async action => {
   const f = await setup(true)
-  await f.service.execute({ resource: 'runs', body: { id: f.id, planId: f.plan.id } }, f.signal); await f.guarding
+  await f.service.execute({ resource: 'runs', body: { id: f.id, planId: f.plan.id } }, f.signal); await testAwait(f.guarding)
   await f.service.execute({ resource: 'runs', id: f.id, action: 'cancel', body: { expectedVersion: 1 } }, f.signal)
   f.release(); await expect.poll(() => f.store.get('run', f.id)?.data.status).toBe('cancelled')
   const version = async () => (await f.service.read('runs', f.id, {}) as { version: number }).version
   await f.service.execute({ resource: 'runs', id: f.id, action: 'reconcile', body: { expectedVersion: await version() } }, f.signal)
   let release!: () => void, entered!: () => void
-  const held = new Promise<void>(resolve => { release = resolve }), waiting = new Promise<void>(resolve => { entered = resolve })
+  const held = new Promise<void>(resolve => { release = fixtureRelease(resolve) }), waiting = new Promise<void>(resolve => { entered = resolve })
   if (action === 'resume') {
     const actual = f.execution.resume.bind(f.execution)
     f.execution.resume = async (...args) => { entered(); await held; return actual(...args) }
@@ -69,7 +79,7 @@ it.each(['resume', 'reconcile'] as const)('fences a foreign cancel during the ne
   }
   cleanup.push(() => { release() })
   const requested = f.service.execute({ resource: 'runs', id: f.id, action, body: { expectedVersion: await version() } }, f.signal)
-  await waiting
+  await testAwait(waiting)
   const oldVersion = await version()
   expect(f.store.get('run', f.id)?.data.status).toBe('paused')
   await expect(f.replacement.execute({ resource: 'runs', id: f.id, action: 'cancel', body: { expectedVersion: oldVersion } }, f.signal)).rejects.toMatchObject({ code: 'RECONCILIATION_REQUIRED' })
@@ -77,14 +87,14 @@ it.each(['resume', 'reconcile'] as const)('fences a foreign cancel during the ne
   release(); await requested
   if (action === 'resume') await expect.poll(() => f.store.get('run', f.id)?.data.status).toBe('awaiting_approval')
   expect(await f.service.read('runs', f.id, {})).toMatchObject({ data: { status: action === 'resume' ? 'awaiting_approval' : 'paused' } })
-})
+}))
 
-it('returns HTTP 409 for unowned queued cancel without persisting a false stop', async () => {
+it('returns HTTP 409 for unowned queued cancel without persisting a false stop', trackedBody(async () => {
   const f = await setup()
   const { createLocalServer } = await import('../../../apps/server/src/index.js')
   const server = createLocalServer({ store: f.replacementStore, services: f.replacement }), origin = await server.listen()
   cleanup.push(() => server.close())
-  await f.service.execute({ resource: 'runs', body: { id: f.id, planId: f.plan.id } }, f.signal); await f.guarding
+  await f.service.execute({ resource: 'runs', body: { id: f.id, planId: f.plan.id } }, f.signal); await testAwait(f.guarding)
   const boot = await fetch(`${origin}/api/v1/session/bootstrap`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ secret: server.bootstrapSecret }) })
   const csrf = (await boot.json() as { csrfToken: string }).csrfToken
   const response = await fetch(`${origin}/api/v1/runs/${f.id}/cancel`, { method: 'POST', headers: { origin, cookie: boot.headers.get('set-cookie')!.split(';')[0], 'x-csrf-token': csrf, 'content-type': 'application/json', 'idempotency-key': 'foreign-stop' }, body: JSON.stringify({ expectedVersion: 1 }) })
@@ -92,11 +102,11 @@ it('returns HTTP 409 for unowned queued cancel without persisting a false stop',
   expect(await f.replacement.read('runs', f.id, {})).toMatchObject({ version: 1, data: { status: 'blocked' } })
   expect(f.counts()).toEqual({ implementations: 0, reviews: 0, checks: 0 })
   f.release(); await f.service.close!()
-})
+}))
 
-it('does not invoke the executor when the persisted resume claim transaction rolls back', async () => {
+it('does not invoke the executor when the persisted resume claim transaction rolls back', trackedBody(async () => {
   const f = await setup(true)
-  await f.service.execute({ resource: 'runs', body: { id: f.id, planId: f.plan.id } }, f.signal); await f.guarding
+  await f.service.execute({ resource: 'runs', body: { id: f.id, planId: f.plan.id } }, f.signal); await testAwait(f.guarding)
   await f.service.execute({ resource: 'runs', id: f.id, action: 'cancel', body: { expectedVersion: 1 } }, f.signal)
   f.release(); await expect.poll(() => f.store.get('run', f.id)?.data.status).toBe('cancelled')
   const version = async () => (await f.service.read('runs', f.id, {}) as { version: number }).version
@@ -111,11 +121,11 @@ it('does not invoke the executor when the persisted resume claim transaction rol
   await expect.poll(() => invoked > 0 || f.store.eventsAfter(before).some(e => e.type === 'api.job.failed')).toBe(true)
   expect(invoked).toBe(0)
   expect(f.counts()).toEqual({ implementations: 0, reviews: 0, checks: 0 })
-})
+}))
 
-it.each(['pause', 'cancel'] as const)('revalidates a local %s after its old job settles and another connection claims resume', async action => {
+it.each(['pause', 'cancel'] as const)('revalidates a local %s after its old job settles and another connection claims resume', trackedBody(async action => {
   const f = await setup(true, 2)
-  await f.service.execute({ resource: 'runs', body: { id: f.id, planId: f.plan.id } }, f.signal); await f.guarding
+  await f.service.execute({ resource: 'runs', body: { id: f.id, planId: f.plan.id } }, f.signal); await testAwait(f.guarding)
   const version = (await f.service.read('runs', f.id, {}) as { version: number }).version
   let terminal = false, injected = false, resumed: Promise<unknown> | undefined
   const append = f.store.appendEvent.bind(f.store), transaction = f.store.transaction.bind(f.store)
@@ -140,10 +150,10 @@ it.each(['pause', 'cancel'] as const)('revalidates a local %s after its old job 
   await expect.poll(() => f.store.get('run', f.id)?.data.status).toBe('awaiting_approval')
   expect(await f.service.read('runs', f.id, {})).toMatchObject({ data: { status: 'awaiting_approval' } })
   expect(f.counts()).toEqual({ implementations: 1, reviews: 0, checks: 0 })
-})
-it('rejects an awaited local cancel when another control changes the same-generation terminal version', async () => {
+}))
+it('rejects an awaited local cancel when another control changes the same-generation terminal version', trackedBody(async () => {
   const f = await setup(true, 2)
-  await f.service.execute({ resource: 'runs', body: { id: f.id, planId: f.plan.id } }, f.signal); await f.guarding
+  await f.service.execute({ resource: 'runs', body: { id: f.id, planId: f.plan.id } }, f.signal); await testAwait(f.guarding)
   const version = (await f.service.read('runs', f.id, {}) as { version: number }).version
   let terminal = false, injected = false, paused: Promise<unknown> | undefined
   const append = f.store.appendEvent.bind(f.store), transaction = f.store.transaction.bind(f.store)
@@ -167,10 +177,10 @@ it('rejects an awaited local cancel when another control changes the same-genera
   expect(injected).toBe(true)
   expect(f.store.get('run', f.id)?.data.status).toBe('paused')
   expect(f.counts()).toEqual({ implementations: 0, reviews: 0, checks: 0 })
-})
-it('revalidates the observed generation for a control with no local job even when the numeric version is unchanged', async () => {
+}))
+it('revalidates the observed generation for a control with no local job even when the numeric version is unchanged', trackedBody(async () => {
   const f = await setup(true, 2)
-  await f.service.execute({ resource: 'runs', body: { id: f.id, planId: f.plan.id } }, f.signal); await f.guarding
+  await f.service.execute({ resource: 'runs', body: { id: f.id, planId: f.plan.id } }, f.signal); await testAwait(f.guarding)
   const readVersion = async () => (await f.service.read('runs', f.id, {}) as { version: number }).version
   const pausing = f.service.execute({ resource: 'runs', id: f.id, action: 'pause', body: { expectedVersion: await readVersion() } }, f.signal)
   f.release(); await pausing
@@ -183,8 +193,8 @@ it('revalidates the observed generation for a control with no local job even whe
   await expect(f.service.execute({ resource: 'runs', id: f.id, action: 'cancel', body: { expectedVersion: version } }, f.signal)).rejects.toMatchObject({ code: 'RECONCILIATION_REQUIRED' })
   expect(f.store.get('run', f.id)?.data.status).toBe('paused')
   expect(f.counts()).toEqual({ implementations: 0, reviews: 0, checks: 0 })
-})
-it('does not treat a terminal generation without its final version as complete control proof', async () => {
+}))
+it('does not treat a terminal generation without its final version as complete control proof', trackedBody(async () => {
   const f = await setup()
   f.store.create('run', { id: f.id, projectId: f.plan.projectId, planId: f.plan.id, status: 'paused' })
   for (const type of ['started', 'finished']) f.store.appendEvent({ id: `legacy-${type}`, projectId: f.plan.projectId,
@@ -192,4 +202,4 @@ it('does not treat a terminal generation without its final version as complete c
   await expect(f.service.execute({ resource: 'runs', id: f.id, action: 'cancel', body: { expectedVersion: 1 } }, f.signal)).rejects.toMatchObject({ code: 'RECONCILIATION_REQUIRED' })
   expect(f.store.get('run', f.id)?.data.status).toBe('paused')
   expect(f.counts()).toEqual({ implementations: 0, reviews: 0, checks: 0 })
-})
+}))

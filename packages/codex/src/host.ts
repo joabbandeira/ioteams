@@ -16,6 +16,8 @@ import { CodexHostError, hostError } from './errors.js'
 import { runtimeEnvironment, validateRuntimeHome } from './runtime.js'
 import { StdioRpc, type RpcId, type RpcMessage } from './rpc.js'
 import manifest from '../protocol/manifest.json' with { type: 'json' }
+import { isNativeApprovalAuthority, type NativeApprovalAuthority } from './approvals.js'
+import { verifyCodexExecutable } from './executable.js'
 const VERSION = manifest.codexCliVersion
 const optionsSchema = z.strictObject({
   runtimeHome: z.string(), cwd: z.string(), runId: IdentifierSchema, permissionProfile: z.string().min(1).max(128),
@@ -24,6 +26,7 @@ const optionsSchema = z.strictObject({
   requestTimeoutMs: z.number().int().min(50).max(60_000).default(10_000),
   turnTimeoutMs: z.number().int().min(50).max(1_800_000).default(1_800_000),
   shutdownTimeoutMs: z.number().int().min(10).max(5000).default(1000),
+  approvalAuthority: z.custom<NativeApprovalAuthority>(isNativeApprovalAuthority).optional(),
 })
 export type CodexHostOptions = z.input<typeof optionsSchema>
 type Options = z.output<typeof optionsSchema>
@@ -101,7 +104,9 @@ export class CodexHost implements HostAdapter {
     const options = optionsSchema.parse(raw)
     if (!isAbsolute(options.cwd)) throw new CodexHostError('UNSAFE_CWD', 'Checkout deve ter caminho absoluto.')
     options.cwd=await realpath(options.cwd)
-    options.runtimeHome=await validateRuntimeHome({runtimeHome:options.runtimeHome,checkoutRoots:[options.cwd],protectedHomes:options.protectedHomes})
+    const nativeExecutable = isAbsolute(options.executable) && options.executableArgs.length === 0 ? await verifyCodexExecutable(options.executable, [options.cwd]) : undefined
+    options.runtimeHome=await validateRuntimeHome({runtimeHome:options.runtimeHome,checkoutRoots:[options.cwd],protectedHomes:options.protectedHomes,nativeExecutable})
+    if (options.approvalAuthority && (options.approvalAuthority.cwd !== options.cwd || options.approvalAuthority.runtimeHome !== options.runtimeHome)) throw new CodexHostError('UNSAFE_THREAD','Autoridade não pertence ao checkout/runtime.')
     for(const path of options.trustedInstructionSources) if(!isAbsolute(path)) throw new CodexHostError('UNTRUSTED_INSTRUCTIONS','Fontes confiáveis exigem caminhos absolutos.')
     const lock=join(options.runtimeHome,'.ioteams-adapter.lock')
     let handle
@@ -178,6 +183,7 @@ export class CodexHost implements HostAdapter {
     let completed=false
     try {
       const input=HostTurnInputSchema.parse(raw)
+      this.options.approvalAuthority?.assertPlan(input.approvedPolicy)
       if(this.disposed)throw new CodexHostError('DISPOSED','Adapter Codex encerrado.')
       if(signal?.aborted)throw new CodexHostError('CANCELLED','Execução cancelada antes do início.')
       if(!this.model)throw new CodexHostError('MODEL_REQUIRED','Selecione um modelo descoberto antes de executar.')
@@ -288,6 +294,11 @@ export class CodexHost implements HostAdapter {
   async respondToApproval(requestId:string,raw:ApprovalDecision):Promise<void> {
     const decision=ApprovalDecisionSchema.parse(raw),approval=this.approvals.get(requestId)
     if(!approval||!this.active||this.active.terminal||approval.turnId!==this.active.turnId)throw new CodexHostError('STALE_APPROVAL','Aprovação ausente, já respondida ou fora do turno ativo.')
+    if (decision === 'accept') {
+      if (!this.options.approvalAuthority) throw new CodexHostError('NATIVE_APPROVAL_GUARD_REQUIRED','Aceitação exige autoridade confiável limitada ao plano.')
+      await this.options.approvalAuthority.assertAccept(approval.kind, approval.params)
+      if (this.approvals.get(requestId) !== approval || this.active?.terminal || this.active?.turnId !== approval.turnId) throw new CodexHostError('STALE_APPROVAL','Turno terminou durante validação.')
+    }
     let result:PermissionsRequestApprovalResponse|CommandExecutionRequestApprovalResponse|FileChangeRequestApprovalResponse
     if(approval.kind==='permissions'){
       const requested=parse(permissionsSchema,approval.params.permissions)

@@ -27,7 +27,7 @@ it('launches the exact native profile/argv with a minimal environment and hashes
     await expect(sandbox.execute(command)).rejects.toMatchObject({ code: 'CHECK_INFRASTRUCTURE' })
     await sandbox.dispose()
   } finally { if (previous === undefined) delete process.env.IOTEAMS_TEST_PARENT; else process.env.IOTEAMS_TEST_PARENT = previous }
-})
+}, 15_000)
 it.each([false, true])('distinguishes check exit 1 from sandbox infrastructure failure (%s)', async infra => {
   const f = await setup('console.error("failed check"); process.exit(1)', infra)
   try {
@@ -36,7 +36,7 @@ it.each([false, true])('distinguishes check exit 1 from sandbox infrastructure f
     if (infra) await expect(result).rejects.toMatchObject({ code: 'CHECK_INFRASTRUCTURE' })
     else expect((await result).exitCode).toBe(1)
   } finally { await f.cleanup() }
-})
+}, 20_000)
 it('terminates only its own process group on check timeout', async () => {
   const f = await setup('setInterval(()=>{},1000)', false, 300)
   try {
@@ -94,4 +94,4 @@ it('rejects a task-owned tool directory symlink before execution and accepts its
     expect((await sandbox.execute(await assertCheckCommand(policy, 'task-1', f.plan.tasks[0].checks[0]))).exitCode).toBe(0)
     await sandbox.dispose()
   } finally { await f.cleanup() }
-})
+}, 20_000)

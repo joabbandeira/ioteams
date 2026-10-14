@@ -51,16 +51,17 @@ describe('Codex stdio adapter (no credentials or inference)',()=>{
     const events=await collect(host);expect(events.at(-1)?.type).toBe('error')
     expect((await messages(runtimeHome)).some(m=>m.method==='turn/start')).toBe(false)
   })
-  it('routes command/file/permissions approvals once using distinct numeric and string RPC ids',async()=>{
+  it('routes command/file/permissions declines once using distinct numeric and string RPC ids',async()=>{
     const {host,runtimeHome}=await setup('approvals');const kinds:string[]=[]
     for await(const event of host.start(input)) if(event.type==='approval.requested'){
       kinds.push(event.request.kind)
-      await host.respondToApproval(event.request.requestId,'accept')
+      await expect(host.respondToApproval(event.request.requestId,'accept')).rejects.toMatchObject({code:'NATIVE_APPROVAL_GUARD_REQUIRED'})
+      await host.respondToApproval(event.request.requestId,'decline')
       await expect(host.respondToApproval(event.request.requestId,'accept')).rejects.toThrow()
     }
     expect(kinds).toEqual(['command','file_change','permissions'])
     const replies=(await messages(runtimeHome)).filter(m=>!m.method)
-    expect(replies).toEqual([{id:91,result:{decision:'accept'}},{id:'91',result:{decision:'accept'}},{id:92,result:{permissions:{network:{enabled:true}},scope:'turn'}}])
+    expect(replies).toEqual([{id:91,result:{decision:'decline'}},{id:'91',result:{decision:'decline'}},{id:92,result:{permissions:{},scope:'turn'}}])
   })
   it.each(['decline','cancel'] as const)('maps approval %s without persistent grants',async decision=>{
     const {host,runtimeHome}=await setup('approvals')
@@ -161,7 +162,9 @@ describe('Codex stdio adapter (no credentials or inference)',()=>{
     const events:HostEvent[]=[]
     for await(const event of host.start(input)){
       events.push(event)
-      if(event.type==='turn.started')await new Promise(resolve=>setTimeout(resolve,100))
+      // The status reply is ordered after the fixture's complete event burst.
+      // Hold the consumer until that barrier (or overflow closes the connection), not a timed sleep.
+      if(event.type==='turn.started')await host.status().catch(()=>{})
     }
     expect(events.at(-1)).toMatchObject({type:'error',code:'EVENT_OVERFLOW'})
     expect(events.length).toBeLessThanOrEqual(1003)
