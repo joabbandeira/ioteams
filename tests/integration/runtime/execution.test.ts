@@ -3,6 +3,8 @@ import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { canonicalJson, sha256 } from '../../../packages/runtime/src/policy.js'
 import { executionFixture, FixtureExecutionService as ExecutionService } from './execution.fixture.js'
+import type { ExecutionResult } from '@ioteams/runtime'
+import type { StoreEvent } from '@ioteams/storage'
 import { git } from '../../fixtures/runtime/repository.js'
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
@@ -10,6 +12,37 @@ async function setup(options: Parameters<typeof executionFixture>[0] = {}) {
   const creating = executionFixture(options)
   cleanups.unshift(creating.cleanup)
   return await creating
+}
+
+type ApprovalFailureSnapshot = {
+  result?: ExecutionResult; resultSettled: boolean; nativeResponses: number; outcomes: string[]; events: StoreEvent[]
+  approvals?: { version: number; id: string; requestId: string; status: string }[]
+}
+/** Test-only failure context: never replace the assertion or expose free text/argv. */
+function rethrowApprovalFailure(error: unknown, collect: ApprovalFailureSnapshot | (() => ApprovalFailureSnapshot)): never {
+  try {
+    const snapshot = typeof collect === 'function' ? collect() : collect
+    const code = (value: unknown) => typeof value === 'string' && /^[A-Z0-9_]{1,128}$/.test(value)
+    const controls = new Set(['execution.status', 'execution.approval.intent', 'execution.check.intent', 'execution.check.result',
+      'execution.session', 'execution.turn', 'execution.turn.result', 'execution.commit.intent', 'execution.commit.result',
+      'execution.push.intent', 'execution.push.result'])
+    const keys = ['status', 'requestId', 'decision', 'phase', 'taskId', 'attemptId', 'threadId', 'turnId',
+      'exitCode', 'startedAt', 'finishedAt', 'contentHash', 'treeHash', 'testedTreeHash', 'sha']
+    const events = snapshot.events.filter(event => controls.has(event.type)).slice(-40).map(event => {
+      const data = event.data && typeof event.data === 'object' && !Array.isArray(event.data) ? event.data : {}
+      const fields = Object.fromEntries(keys.filter(key => typeof data[key] === 'string' || typeof data[key] === 'number')
+        .map(key => [key, typeof data[key] === 'string' ? data[key].slice(0, 256) : data[key]]))
+      const command = data.command && typeof data.command === 'object' && !Array.isArray(data.command) ? data.command : undefined
+      return { sequence: event.sequence, type: event.type, at: event.at, ...fields,
+        ...(event.type === 'execution.status' && code(data.reason) ? { reason: data.reason } : {}),
+        ...(command ? { command: { executable: typeof command.executable === 'string' ? command.executable.slice(0, 128) : undefined,
+          timeoutMs: typeof command.timeoutMs === 'number' ? command.timeoutMs : undefined } } : {}) }
+    })
+    const result = snapshot.result && { id: snapshot.result.id, status: snapshot.result.status,
+      ...(code(snapshot.result.reason) ? { reason: snapshot.result.reason } : {}) }
+    if (error instanceof Error) error.message += `\nApproval failure diagnostics: ${JSON.stringify({ ...snapshot, result, events })}`
+  } catch { /* Diagnostic collection/formatting must never replace the original failure. */ }
+  throw error
 }
 
 it('runs real checks, independent review and exact commit/push before DONE; duplicate calls have no effects', async () => {
@@ -295,9 +328,26 @@ it('accepts one explicitly bound approval and rejects concurrent duplicate respo
   const service = new ExecutionService({ ...f, createHost }), running = service.start({ id: 'run-1' }, f.policy, f.workspace)
   await expect.poll(() => f.store.get('run', 'run-1')?.data.status, { timeout: 7000 }).toBe('awaiting_approval')
   const results = await Promise.allSettled([service.respondToApproval('run-1', 'request-1', 'accept'), service.respondToApproval('run-1', 'request-1', 'accept')])
-  expect(results.map(r => r.status).sort()).toEqual(['fulfilled', 'rejected'])
-  expect(responses).toBe(1)
-  expect((await running).status).toBe('completed')
+  let finalResult: ExecutionResult | undefined
+  try {
+    expect(results.map(r => r.status).sort()).toEqual(['fulfilled', 'rejected'])
+    expect(responses).toBe(1)
+    finalResult = await running
+    expect(finalResult.status).toBe('completed')
+  } catch (error) {
+    rethrowApprovalFailure(error, () => {
+      const events: StoreEvent[] = []; let cursor = 0
+      while (true) {
+        const page = f.store.eventsAfter(cursor, { limit: 1000 }); events.push(...page.filter(event => event.runId === 'run-1'))
+        if (page.length < 1000) break
+        cursor = page.at(-1)!.sequence
+      }
+      return { result: finalResult ?? service.status('run-1'), resultSettled: finalResult !== undefined,
+        nativeResponses: responses, outcomes: results.map(result => result.status), events,
+        approvals: f.store.list('approval').filter(record => record.data.runId === 'run-1')
+          .map(({ version, data }) => ({ version, id: data.id, requestId: data.requestId, status: data.status })) }
+    })
+  }
 }, 20_000)
 
 it('prevents another service from reconciling a still-active native turn', async () => {
@@ -358,4 +408,36 @@ it('pauses immediately on an uncertain approval RPC and never retries the native
     expect(responses).toBe(1)
     expect(f.counts().checks).toBe(0)
   } finally { abort.abort(); await running }
+})
+
+it('preserves approval assertion identity and pause reason without exposing event text or command arguments', () => {
+  const assertion = new Error('expected completed')
+  let caught: unknown
+  try {
+    rethrowApprovalFailure(assertion, {
+      result: { id: 'run-1', status: 'paused', reason: 'EXECUTION_INTERRUPTED' }, resultSettled: true,
+      nativeResponses: 1, outcomes: ['fulfilled', 'rejected'],
+      events: [{ sequence: 7, id: 'event-7', projectId: 'project-1', runId: 'run-1', type: 'execution.check.intent', at: '2026-10-14T23:00:00.000Z', data: { taskId: 'task-1', command: { executable: 'node', args: ['sensitive-fixture-text'], timeoutMs: 1000 }, text: 'sensitive-fixture-text' } },
+        { sequence: 8, id: 'event-8', projectId: 'project-1', runId: 'run-1', type: 'execution.status', at: '2026-10-14T23:00:01.000Z', data: { status: 'paused', reason: 'EXECUTION_INTERRUPTED', transcript: 'sensitive-fixture-text' } },
+        { sequence: 9, id: 'event-9', projectId: 'project-1', runId: 'run-1', type: 'execution.check.intent', at: '2026-10-14T23:00:01.000Z', data: { command: { executable: { arbitrary: 'sensitive-fixture-text' }, timeoutMs: { arbitrary: 'sensitive-fixture-text' } } } },
+        { sequence: 10, id: 'event-10', projectId: 'project-1', runId: 'run-1', type: 'execution.rejected', at: '2026-10-14T23:00:02.000Z', data: { reason: 'sensitive-fixture-text' } },
+        { sequence: 11, id: 'event-11', projectId: 'project-1', runId: 'run-1', type: 'execution.status', at: '2026-10-14T23:00:03.000Z', data: { status: 'paused', reason: 'sensitive-fixture-text' } }],
+    })
+  } catch (error) { caught = error }
+  expect(caught).toBe(assertion)
+  expect(assertion.message).toContain('EXECUTION_INTERRUPTED')
+  expect(assertion.message).toContain('execution.check.intent')
+  expect(assertion.message).toContain('1000')
+  expect(assertion.message).not.toContain('sensitive-fixture-text')
+})
+
+it('never replaces the original approval assertion when diagnostics cannot be collected or attached', () => {
+  const snapshot: ApprovalFailureSnapshot = { result: { id: 'run-1', status: 'paused', reason: 'GIT_FAILED' }, resultSettled: true, nativeResponses: 1, outcomes: ['fulfilled', 'rejected'], events: [] }
+  const frozen = Object.freeze(new Error('original frozen assertion'))
+  let caught: unknown
+  try { rethrowApprovalFailure(frozen, snapshot) } catch (error) { caught = error }
+  expect(caught).toBe(frozen)
+  const original = new Error('original assertion before failed collection')
+  try { rethrowApprovalFailure(original, () => { throw new Error('diagnostic source unavailable') }) } catch (error) { caught = error }
+  expect(caught).toBe(original)
 })
