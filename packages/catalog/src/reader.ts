@@ -6,9 +6,9 @@ import { parseFrontmatter } from './frontmatter.js'
 
 export const CORPUS_ROOTS = { profissoes: 'profession', stacks: 'stack', profissionais: 'professional', equipes: 'team' } as const
 const MAX_MARKDOWN_BYTES = 1_048_576
-const excludedDirectories = new Set(['node_modules', 'dist', 'build', 'coverage', 'runtime', 'logs', 'receipts', 'artifacts'])
-const excludedFiles = new Set(['agents.md', 'claude.md', 'gemini.md', 'skill.md', 'instructions.md'])
-const excluded = (name: string) => name.startsWith('.') || excludedDirectories.has(name.toLowerCase()) || excludedFiles.has(name.toLowerCase())
+const excludedDirectories = new Set(['node_modules', 'dist', 'build', 'coverage', 'runtime', 'logs', 'receipts', 'artifacts', 'config', 'configs', 'settings', 'skills', 'secrets', 'credentials', 'operations', 'sessions', 'checkpoints'])
+const excludedFiles = new Set(['agents.md', 'claude.md', 'gemini.md', 'skill.md', 'instructions.md', 'config.md', 'settings.md', 'secrets.md', 'credentials.md', 'auth.md', 'tokens.md'])
+const excluded = (name: string) => name.startsWith('.') || excludedDirectories.has(name.toLowerCase()) || excludedFiles.has(name.toLowerCase()) || /^(?:agents|claude|gemini|skill|instructions)(?:[._-].*)?\.md$/i.test(name)
 const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT'
 async function assertRoot(root: string): Promise<string> {
   const absolute = resolve(root)
@@ -34,6 +34,10 @@ function assertCorpusPath(relative: string) {
   const parts = relative.split('/')
   if (!(Object.hasOwn(CORPUS_ROOTS, parts[0])) || parts.some(excluded) || !relative.endsWith('.md'))
     throw new Error('Caminho fora do corpus Markdown autorizado')
+}
+/** Shared selection policy for filesystem enumeration and committed Git trees. */
+export function isCorpusMarkdownPath(relative: string): boolean {
+  try { assertCorpusPath(relative); return true } catch { return false }
 }
 export async function readMarkdown(root: string, relative: string): Promise<string> {
   assertCorpusPath(relative)
