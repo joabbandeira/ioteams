@@ -12,7 +12,12 @@ const professions = [
   { id: 'metodologia-agil-scrum', groups: ['papeis', 'eventos', 'artefatos', 'referencias'] },
   { id: 'desenvolvimento-de-sistemas', groups: ['disciplinas', 'ciclos', 'artefatos', 'referencias'] },
 ]
-const inSlice = (path: string) => professions.some(({ id }) => path.startsWith(`profissoes/${id}/`))
+const engineeringProfessions = [
+  { id: 'devops', groups: ['pilares', 'ciclos', 'artefatos', 'referencias'] },
+  { id: 'engenharia-de-software', groups: ['pilares', 'ciclos', 'artefatos', 'referencias'] },
+]
+const allProfessions = [...professions, ...engineeringProfessions]
+const inSlice = (path: string) => allProfessions.some(({ id }) => path.startsWith(`profissoes/${id}/`))
 function links(tokens: Token[]): string[] {
   const result: string[] = []
   marked.walkTokens(tokens, token => { if (token.type === 'link') result.push(token.href) })
@@ -29,7 +34,7 @@ function section(tokens: Token[], heading: string): Token[] {
 }
 
 it('descobre as duas profissões como entidades válidas e resolve a associação de um profissional', async () => {
-  const entries = (await loadCatalog(root)).filter(entry => inSlice(entry.path))
+  const entries = (await loadCatalog(root)).filter(entry => professions.some(({ id }) => entry.metadata.id === id))
   expect(entries.map(entry => entry.metadata.id).sort()).toEqual(['desenvolvimento-de-sistemas', 'metodologia-agil-scrum'])
   expect(entries.every(entry => entry.metadata.kind === 'profession')).toBe(true)
   const catalog = CatalogSchema.parse([...entries.map(entry => entry.metadata), {
@@ -39,7 +44,18 @@ it('descobre as duas profissões como entidades válidas e resolve a associaçã
   expect(catalog.find(entry => entry.kind === 'professional')?.professionIds).toHaveLength(2)
 })
 
-it.each(professions)('$id oferece navegação entre descrição, agrupamentos explicativos e fontes primárias', async ({ id, groups }) => {
+it('descobre DevOps e Engenharia de Software e resolve ambas em um perfil independente do restante do acervo', async () => {
+  const entries = (await loadCatalog(root)).filter(entry => engineeringProfessions.some(({ id }) => entry.metadata.id === id))
+  expect(entries.map(entry => entry.metadata.id).sort()).toEqual(['devops', 'engenharia-de-software'])
+  expect(entries.every(entry => entry.metadata.kind === 'profession')).toBe(true)
+  const catalog = CatalogSchema.parse([...entries.map(entry => entry.metadata), {
+    version: 1, kind: 'professional', id: 'fixture-t03', name: 'Fixture T03', fictitious: true,
+    professionIds: ['devops', 'engenharia-de-software'], stackIds: [],
+  }])
+  expect(catalog.find(entry => entry.kind === 'professional')?.professionIds).toEqual(['devops', 'engenharia-de-software'])
+})
+
+it.each(allProfessions)('$id oferece navegação entre descrição, agrupamentos explicativos e fontes primárias', async ({ id, groups }) => {
   const base = `profissoes/${id}/`
   const description = `${base}descricao.md`
   const documents = (await listCorpusMarkdown(root)).filter(path => path.startsWith(base))
@@ -58,10 +74,25 @@ it.each(professions)('$id oferece navegação entre descrição, agrupamentos ex
       expect(hrefs.some(href => {
         if (!href.startsWith('https://')) return false
         return ['scrumguides.org', 'www.scrum.org', 'www.w3.org', 'spec.openapis.org', 'www.sqlite.org',
-          'playwright.dev', 'martinfowler.com'].includes(new URL(href).hostname)
+          'playwright.dev', 'martinfowler.com', 'dora.dev', 'sre.google', 'tag-app-delivery.cncf.io',
+          'developer.hashicorp.com', 'opentelemetry.io', 'csrc.nist.gov', 'owasp.org',
+          'www.sei.cmu.edu', 'aws.amazon.com'].includes(new URL(href).hostname)
       }), `Fonte primária: ${path}`).toBe(true)
     }
   }
+})
+
+it('permite consultar o recorte canônico de assuntos compartilhados a partir dos pilares de cada profissão', async () => {
+  const devops = marked.lexer(await readMarkdown(root, 'profissoes/devops/pilares/praticas.md'))
+  const software = marked.lexer(await readMarkdown(root, 'profissoes/engenharia-de-software/pilares/praticas.md'))
+  expect(links(section(devops, 'Segurança da operação')))
+    .toContain('../../engenharia-de-software/pilares/praticas.md#segurança-de-aplicações')
+  expect(links(section(devops, 'Confiabilidade')))
+    .toContain('../../engenharia-de-software/pilares/praticas.md#sistemas-distribuídos')
+  expect(links(section(software, 'Verificação')))
+    .toContain('../../devops/pilares/praticas.md#entrega-contínua')
+  expect(links(section(software, 'Sistemas distribuídos')))
+    .toContain('../../devops/pilares/praticas.md#observabilidade')
 })
 
 it('mantém responsabilidades Scrum separadas e ligadas aos seus objetos de colaboração', async () => {
