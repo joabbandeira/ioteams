@@ -62,8 +62,24 @@ test('configures a bound demand, searches real citations and reviews/approves th
   await expect(page.getByRole('checkbox', { name: 'Git', exact: true })).toBeDisabled()
   await expect(page.getByRole('checkbox', { name: 'Desenvolvimento', exact: true })).toBeChecked()
   await page.getByRole('button', { name: 'Iniciar execução', exact: true }).click()
-  await page.getByRole('dialog').getByRole('button', { name: 'Iniciar execução', exact: true }).click()
-  await page.getByRole('link', { name: 'Execuções', exact: true }).click()
+  // Backend preparation and UI rendering are distinct phases within the same 30s test.
+  // Observe the actual persisted request before spending the unchanged 5s UI expect.
+  const acceptedRun = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/v1/runs' && response.status() === 200)
+  const pendingApproval = page.waitForResponse(async response => {
+    if (response.request().method() !== 'GET' || new URL(response.url()).pathname !== '/api/v1/approvals' || response.status() !== 200) return false
+    const records = await response.json() as Array<{ data: { requestId: string; status: string } }>
+    return records.some(record => record.data.requestId === 'e2e-request-1' && record.data.status === 'pending')
+  })
+  const [runResponse, approvalResponse] = await Promise.all([acceptedRun, pendingApproval, (async () => {
+    await page.getByRole('dialog').getByRole('button', { name: 'Iniciar execução', exact: true }).click()
+    await page.getByRole('link', { name: 'Execuções', exact: true }).click()
+  })()])
+  const run = await runResponse.json() as { id: string; status: string }
+  const approvals = await approvalResponse.json() as Array<{ data: { requestId: string } }>
+  expect(run.status).toBe('accepted')
+  expect(approvals.find(record => record.data.requestId === 'e2e-request-1')).toMatchObject({ data: {
+    runId: run.id, requestId: 'e2e-request-1', threadId: 'e2e-thread-1', turnId: 'e2e-turn-1', status: 'pending',
+  } })
   await expect(page.getByRole('heading', { name: 'Autorizar check simulado' })).toBeVisible()
   await page.getByRole('button', { name: 'Alternar tema' }).click()
   await expect(page.locator('html')).toHaveClass(/dark/)
@@ -73,10 +89,17 @@ test('configures a bound demand, searches real citations and reviews/approves th
     await page.setViewportSize({ width: 390, height: 844 }); await page.getByRole('dialog').screenshot({ path: join(process.env.IOTEAMS_VISUAL_DIR, 'approval-narrow.png') })
     await page.setViewportSize({ width: 1280, height: 900 })
   }
-  await page.getByRole('dialog').getByRole('button', { name: 'Aceitar solicitação', exact: true }).click()
-  await expect(page.getByRole('dialog')).toHaveCount(0)
-  await page.getByRole('button', { name: 'Alternar tema' }).click()
-  await page.getByRole('button', { name: /^Inspecionar execução/ }).click()
+  const completedRun = page.waitForResponse(async response => {
+    if (response.request().method() !== 'GET' || new URL(response.url()).pathname !== '/api/v1/runs' || response.status() !== 200) return false
+    const records = await response.json() as Array<{ data: { id: string; status: string } }>
+    return records.some(record => record.data.id === run.id && record.data.status === 'completed')
+  })
+  await Promise.all([completedRun, (async () => {
+    await page.getByRole('dialog').getByRole('button', { name: 'Aceitar solicitação', exact: true }).click()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await page.getByRole('button', { name: 'Alternar tema' }).click()
+    await page.getByRole('button', { name: /^Inspecionar execução/ }).click()
+  })()])
   await expect(page.getByText('Tentativa 1 · REJECTED', { exact: true })).toBeVisible()
   await expect(page.getByText('Check · saída 1', { exact: true })).toBeVisible()
   await expect(page.getByText('Check · saída 0', { exact: true })).toBeVisible()
