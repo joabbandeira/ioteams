@@ -1,7 +1,22 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { test as base, expect, type Cookie } from '@playwright/test'
+import { createServer } from 'node:http'
+import { z } from 'zod'
+import { records, resolveRoute } from '@ioteams/server/contracts'
+import { test as base, expect, type Cookie, type Page, type Request } from '@playwright/test'
 base.describe.configure({ mode: 'default' })
+async function observeJson<T>(page: Page, method: string, url: string, schema: z.ZodType<T>, matches: (value: T) => boolean): Promise<T> {
+  const captured = new WeakMap<Request, T>()
+  const request = await page.waitForEvent('requestfinished', async request => {
+    if (request.method() !== method || request.url() !== url) return false
+    const response = request.existingResponse()
+    if (!response || response.status() !== 200) return false
+    const value = schema.parse(await response.json())
+    if (!matches(value)) return false
+    captured.set(request, value); return true
+  })
+  return captured.get(request)!
+}
 const test = base.extend<{}, { localCookies: Cookie[] }>({
   localCookies: [async ({ browser }, use) => {
     const context = await browser.newContext(), page = await context.newPage()
@@ -16,6 +31,55 @@ const test = base.extend<{}, { localCookies: Cookie[] }>({
     await expect(page.getByRole('heading', { name: 'Trabalho' })).toBeVisible()
     const cookies = await context.cookies(); await writeFile(file, JSON.stringify({ cookies }), { mode: 0o600 }); await context.close(); await use(cookies)
   }, { scope: 'worker' }],
+})
+test('observes complete JSON after a cancelled body and preserves parsed data across navigation', async ({ page }) => {
+  let requests = 0, abortedClosed!: () => void
+  const closed = new Promise<void>(resolve => { abortedClosed = resolve })
+  const payload = { state: 'complete' as const, sequence: 2 }
+  const schema = z.strictObject({ state: z.literal('complete'), sequence: z.number().int().positive() })
+  const server = createServer((request, response) => {
+    if (request.url?.split('?')[0] === '/') {
+      response.writeHead(200, { 'content-type': 'text/html', 'content-security-policy': "default-src 'none'; connect-src 'self'" })
+      response.end('<!doctype html><title>Body boundary fixture</title>'); return
+    }
+    if (request.url === '/invalid-json' || request.url === '/invalid-contract') {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(request.url === '/invalid-json' ? '{broken' : '{"state":"complete","sequence":"wrong"}'); return
+    }
+    if (request.url !== '/body-boundary') { response.writeHead(404); response.end(); return }
+    requests++
+    response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+    if (requests === 1) { response.on('close', abortedClosed); response.write('{"state":"complete",'); return }
+    response.end(JSON.stringify(payload))
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address(); if (!address || typeof address === 'string') throw Error('Missing test server address')
+  const url = `http://127.0.0.1:${address.port}/body-boundary`
+  try {
+    await page.goto(new URL('/', url).href)
+    const outcome = observeJson(page, 'GET', url, schema, value => value.state === 'complete').then(value => ({ value }), error => ({ error: String(error) }))
+    const headers = page.waitForResponse(response => response.url() === url)
+    const failed = page.waitForEvent('requestfailed', request => request.url() === url)
+    await page.evaluate(`(() => { window.bodyBoundaryController = new AbortController(); void fetch(${JSON.stringify(url)}, { signal: window.bodyBoundaryController.signal, credentials: 'omit' }).then(response => response.json()).catch(() => {}); })()`)
+    await headers
+    await page.evaluate('window.bodyBoundaryController.abort()')
+    await failed; await closed
+    await page.evaluate(`fetch(${JSON.stringify(url)}, { credentials: 'omit' }).then(response => response.json())`)
+    const observed = await outcome
+    if ('error' in observed) console.error('[body-boundary]', JSON.stringify({ requests, error: observed.error }))
+    expect(observed).toEqual({ value: payload })
+    await page.goto(new URL('/?after-observation', url).href)
+    expect(observed).toEqual({ value: payload })
+    expect(requests).toBe(2)
+    for (const [path, name] of [['/invalid-json', 'SyntaxError'], ['/invalid-contract', 'ZodError']]) {
+      const invalidUrl = new URL(path, url).href
+      const rejection = expect(observeJson(page, 'GET', invalidUrl, schema, () => true)).rejects.toMatchObject({ name })
+      await page.evaluate(`fetch(${JSON.stringify(invalidUrl)}, { credentials: 'omit' }).then(response => response.text())`)
+      await rejection
+    }
+  } finally {
+    await new Promise<void>((resolve, reject) => { server.close(error => error ? reject(error) : resolve()); server.closeAllConnections() })
+  }
 })
 test('requires an explicit local session and never exposes operational catalog data without it', async ({ page }) => {
   await page.goto('/')
@@ -64,18 +128,14 @@ test('configures a bound demand, searches real citations and reviews/approves th
   await page.getByRole('button', { name: 'Iniciar execução', exact: true }).click()
   // Backend preparation and UI rendering are distinct phases within the same 30s test.
   // Observe the actual persisted request before spending the unchanged 5s UI expect.
-  const acceptedRun = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/v1/runs' && response.status() === 200)
-  const pendingApproval = page.waitForResponse(async response => {
-    if (response.request().method() !== 'GET' || new URL(response.url()).pathname !== '/api/v1/approvals' || response.status() !== 200) return false
-    const records = await response.json() as Array<{ data: { requestId: string; status: string } }>
-    return records.some(record => record.data.requestId === 'e2e-request-1' && record.data.status === 'pending')
-  })
-  const [runResponse, approvalResponse] = await Promise.all([acceptedRun, pendingApproval, (async () => {
+  const acceptedRun = observeJson(page, 'POST', new URL('/api/v1/runs', page.url()).href, resolveRoute('POST', '/api/v1/runs').output, () => true)
+  const pendingApproval = observeJson(page, 'GET', new URL('/api/v1/approvals', page.url()).href, z.array(records.approvals),
+    approvals => approvals.some(record => record.data.requestId === 'e2e-request-1' && record.data.status === 'pending'))
+  const [accepted, approvals] = await Promise.all([acceptedRun, pendingApproval, (async () => {
     await page.getByRole('dialog').getByRole('button', { name: 'Iniciar execução', exact: true }).click()
-    await page.getByRole('link', { name: 'Execuções', exact: true }).click()
   })()])
-  const run = await runResponse.json() as { id: string; status: string }
-  const approvals = await approvalResponse.json() as Array<{ data: { requestId: string } }>
+  const run = accepted as { id: string; status: string }
+  await page.getByRole('link', { name: 'Execuções', exact: true }).click()
   expect(run.status).toBe('accepted')
   expect(approvals.find(record => record.data.requestId === 'e2e-request-1')).toMatchObject({ data: {
     runId: run.id, requestId: 'e2e-request-1', threadId: 'e2e-thread-1', turnId: 'e2e-turn-1', status: 'pending',
@@ -89,17 +149,15 @@ test('configures a bound demand, searches real citations and reviews/approves th
     await page.setViewportSize({ width: 390, height: 844 }); await page.getByRole('dialog').screenshot({ path: join(process.env.IOTEAMS_VISUAL_DIR, 'approval-narrow.png') })
     await page.setViewportSize({ width: 1280, height: 900 })
   }
-  const completedRun = page.waitForResponse(async response => {
-    if (response.request().method() !== 'GET' || new URL(response.url()).pathname !== '/api/v1/runs' || response.status() !== 200) return false
-    const records = await response.json() as Array<{ data: { id: string; status: string } }>
-    return records.some(record => record.data.id === run.id && record.data.status === 'completed')
-  })
-  await Promise.all([completedRun, (async () => {
+  const completedRun = observeJson(page, 'GET', new URL('/api/v1/runs', page.url()).href, z.array(records.runs),
+    runs => runs.some(record => record.data.id === run.id && record.data.status === 'completed'))
+  const [completed] = await Promise.all([completedRun, (async () => {
     await page.getByRole('dialog').getByRole('button', { name: 'Aceitar solicitação', exact: true }).click()
     await expect(page.getByRole('dialog')).toHaveCount(0)
-    await page.getByRole('button', { name: 'Alternar tema' }).click()
-    await page.getByRole('button', { name: /^Inspecionar execução/ }).click()
   })()])
+  expect(completed.find(record => record.data.id === run.id)?.data.status).toBe('completed')
+  await page.getByRole('button', { name: 'Alternar tema' }).click()
+  await page.getByRole('button', { name: /^Inspecionar execução/ }).click()
   await expect(page.getByText('Tentativa 1 · REJECTED', { exact: true })).toBeVisible()
   await expect(page.getByText('Check · saída 1', { exact: true })).toBeVisible()
   await expect(page.getByText('Check · saída 0', { exact: true })).toBeVisible()
