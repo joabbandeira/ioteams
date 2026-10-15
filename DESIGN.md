@@ -84,6 +84,10 @@ Button existente é o dono de ênfase: sólido para ação principal, outline/gh
 
 Quatro links por hash: Trabalho, Conhecimento, Execuções, Configuração. O destino atual é marcado e atualiza o título. Pessoas mostram profissão/stacks separadas de papel Scrum. O quadro operacional lê os estados do serviço sem controles de progressão manual. A cadência distingue sprints reais de registros de eventos ainda não expostos.
 
+### Operational history
+
+As sete colunas permanecem presentes mesmo vazias. Inspecionar uma tarefa abre o histórico abaixo do quadro e move o foco para esse painel. A timeline usa uma lista ordenada com borda violeta derivada de `--primary`; horários UTC, tentativas e SHAs completos tornam a sequência auditável. Estado técnico aparece com o rótulo Execução, separado da coluna da tarefa. Intenções de commit/push e resultados confirmados recebem rótulos distintos. Históricos extensos usam Mostrar mais; o documento continua dono do scroll vertical.
+
 ### Forms and overlays
 
 FieldSelect reutiliza o Select Radix existente: popup authored com largura do trigger, limite de viewport e teclado padrão. Formulários têm `noValidate`, labels, erro associado e foco no primeiro campo inválido. Textareas têm altura suficiente e `resize:none`. ConfirmAction reutiliza Dialog Radix, foco contido, Escape e restauração. Notice é o feedback operacional canônico; o toast transitório do demo permanece uma variante isolada da simulação.

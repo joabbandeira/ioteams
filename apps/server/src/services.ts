@@ -6,7 +6,7 @@ import { searchKnowledge, type KnowledgeIndex, type SearchKnowledgeOptions } fro
 import { ConflictError, canonicalJson, type Store, type EntityKind, type StoreEvent, type JsonValue, type EntityMap, type Versioned } from '@ioteams/storage'
 import { PlanningService, ExecutionService, type ApprovedPolicy, type Workspace, type PlanningProposal } from '@ioteams/runtime'
 import { ApiError, records, TaskCreateSchema, TaskControlSchema, PlanRequestSchema, PlanApprovalSchema,
-  ProposalResponseSchema, type ApiServices, type ApiCommand, type Resource, type TrustedBinding } from './contracts.js'
+  ProposalResponseSchema, RunTimelineSchema, RunTimelineEventSchema, type ApiServices, type ApiCommand, type Resource, type TrustedBinding } from './contracts.js'
 
 export interface ExecutionContext { policy: ApprovedPolicy; workspace: Workspace }
 export interface DomainServiceOptions {
@@ -18,7 +18,7 @@ export interface DomainServiceOptions {
   executionContext?(planId: string, runId: string, signal?: AbortSignal): Promise<ExecutionContext>
   policyDirectory?: string
 }
-const kinds = { projects: 'project', demands: 'demand', plans: 'approvedPlan', sprints: 'sprint', tasks: 'task', runs: 'run', approvals: 'approval' } as const
+const kinds = { projects: 'project', demands: 'demand', plans: 'approvedPlan', sprints: 'sprint', tasks: 'task', runs: 'run', approvals: 'approval', evidence: 'evidence' } as const
 const json = (input: unknown) => z.json().parse(JSON.parse(JSON.stringify(input)))
 function events(store: Store, projectId?: string) {
   const result: StoreEvent[] = []; let cursor = 0
@@ -157,6 +157,24 @@ export function createDomainServices(options: DomainServiceOptions): ApiServices
       requireOpen()
       if (resource === 'bindings') return options.planningBindings?.() ?? []
       if (resource === 'catalog') return loadCatalog(options.catalogRoot)
+      if (resource === 'runTimeline') {
+        const run = runRecord(id!)
+        if (!run) throw new ApiError(404, 'NOT_FOUND')
+        const history = events(store, run.data.projectId).filter(item => item.runId === id && item.sequence > Number(query.after ?? 0))
+          .flatMap(item => {
+            const parsed = RunTimelineEventSchema.safeParse({ sequence: item.sequence, id: item.id, at: item.at, type: item.type, data: item.data })
+            return parsed.success ? [parsed.data] : []
+          })
+        const plan = store.get('approvedPlan', run.data.planId)?.data
+        let plannedSources: z.infer<typeof RunTimelineSchema>['plannedSources'] = []
+        if (plan && events(store, run.data.projectId).some(item => item.type === 'planning.approved' &&
+          (item.data as Record<string, JsonValue>).demandId === plan.demandId && (item.data as Record<string, JsonValue>).policyHash === plan.plan.policyHash)) {
+          const approved = proposal(plan.demandId)
+          plannedSources = approved.roles.filter(role => role.role === 'Developer').flatMap(role => role.citations)
+        }
+        return RunTimelineSchema.parse({ runId: id, events: history.slice(0, 100), plannedSources,
+          ...(history.length > 100 ? { nextCursor: history[99].sequence } : {}) })
+      }
       if (resource === 'runStatus') {
         const run = store.get('run', id!), record = runRecord(id!)
         if (run) return options.execution?.status(id!) ?? { id, status: record!.data.status }

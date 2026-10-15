@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { ApprovalDecisionSchema, CatalogMetadataSchema, ContentHashSchema, CreateTaskSchema,
-  IdentifierSchema, KnowledgeCitationSchema, RunStatusSchema, TaskTransitionSchema, ProductBacklogSchema, SprintBacklogSchema, DefinitionOfDoneSchema } from '@ioteams/core'
+  IdentifierSchema, GitShaSchema, KnowledgeCitationSchema, RunStatusSchema, TaskTransitionSchema, ProductBacklogSchema, SprintBacklogSchema, DefinitionOfDoneSchema } from '@ioteams/core'
 import { EntitySchemas } from '@ioteams/storage/entities'
 import { PlanningDemandSchema, PlanningRoleRecordSchema, CompetencyGapSchema } from '@ioteams/runtime/planning-contracts'
 import { SearchKnowledgeOptionsSchema } from '@ioteams/knowledge/contracts'
@@ -14,11 +14,11 @@ const empty = z.strictObject({})
 const record = <T extends z.ZodType>(schema: T) => z.strictObject({ version: VersionSchema, data: schema })
 export const records = {
   projects: record(EntitySchemas.project), demands: record(EntitySchemas.demand), plans: record(EntitySchemas.approvedPlan),
-  sprints: record(EntitySchemas.sprint), tasks: record(EntitySchemas.task), runs: record(EntitySchemas.run), approvals: record(EntitySchemas.approval),
+  sprints: record(EntitySchemas.sprint), tasks: record(EntitySchemas.task), runs: record(EntitySchemas.run), approvals: record(EntitySchemas.approval), evidence: record(EntitySchemas.evidence),
 }
 export const TrustedBindingSchema = z.strictObject({ demandId: IdentifierSchema, repositoryPath: records.projects.shape.data.shape.repositoryPath, plan: EntitySchemas.approvedPlan.shape.plan })
 export type TrustedBinding = z.infer<typeof TrustedBindingSchema>
-export type Resource = keyof typeof records | 'catalog' | 'knowledge' | 'proposals' | 'planningStatus' | 'runStatus' | 'bindings'
+export type Resource = keyof typeof records | 'catalog' | 'knowledge' | 'proposals' | 'planningStatus' | 'runStatus' | 'runTimeline' | 'bindings'
 export interface ApiCommand { resource: Resource; id?: string; action?: string; body: unknown }
 export interface ApiServices {
   read(resource: Resource, id: string | undefined, query: Record<string, string>): Promise<unknown>
@@ -29,6 +29,17 @@ export interface Route { resource: Resource; id?: string; action?: string; input
 const listing = z.strictObject({ projectId: IdentifierSchema.optional() })
 export const ExecutionResultSchema = z.strictObject({ id: IdentifierSchema, status: RunStatusSchema, version: VersionSchema.optional(),
   reason: z.string().max(128).regex(/^[A-Z0-9_]+$/).optional() })
+// Read-only, allowlisted projection. Never serialize raw host output, policy or workspace.
+export const RunTimelineEventSchema = z.strictObject({ sequence: z.number().int().positive(), id: IdentifierSchema,
+  at: z.iso.datetime({ offset: true }), type: z.enum(['execution.status', 'execution.attempt', 'execution.session', 'execution.turn',
+    'execution.turn.result', 'execution.rejected', 'execution.commit.intent', 'execution.commit.result', 'execution.push.intent', 'execution.push.result']),
+  data: z.object({ taskId: IdentifierSchema.optional(), attemptId: IdentifierSchema.optional(), phase: z.enum(['implement', 'review']).optional(),
+    threadId: IdentifierSchema.optional(), turnId: IdentifierSchema.optional(), status: RunStatusSchema.optional(),
+    reason: z.string().max(16_384).optional(), attempt: z.number().int().min(1).max(3).optional(),
+    baseSha: GitShaSchema.optional(), sha: GitShaSchema.optional(), treeHash: GitShaSchema.optional(), parentSha: GitShaSchema.optional() }),
+})
+export const RunTimelineSchema = z.strictObject({ runId: IdentifierSchema, events: z.array(RunTimelineEventSchema).max(100),
+  nextCursor: z.number().int().positive().optional(), plannedSources: z.array(KnowledgeCitationSchema).max(400) })
 const accepted = z.strictObject({ id: IdentifierSchema, status: z.literal('accepted') })
 const version = z.strictObject({ expectedVersion: VersionSchema })
 export const TaskCreateSchema = z.strictObject({ projectId: IdentifierSchema, planId: IdentifierSchema,
@@ -76,6 +87,8 @@ export function resolveRoute(method: string, path: string): Route {
     return { resource: 'planningStatus', id, input: empty, query: empty, output: PlanningStatusSchema }
   if (method === 'GET' && resource === 'runs' && id && action === 'status')
     return { resource: 'runStatus', id, input: empty, query: empty, output: ExecutionResultSchema }
+  if (method === 'GET' && resource === 'runs' && id && action === 'timeline')
+    return { resource: 'runTimeline', id, input: empty, query: z.strictObject({ after: z.string().regex(/^(0|[1-9]\d{0,15})$/).refine(value => Number.isSafeInteger(Number(value))).optional() }), output: RunTimelineSchema }
   if (method === 'GET' && resource === 'demands' && id && action === 'proposal')
     return { resource: 'proposals', id, input: empty, query: empty, output: ProposalResponseSchema }
   if (!Object.hasOwn(records, resource ?? '')) throw new ApiError(404, 'NOT_FOUND')

@@ -36,8 +36,12 @@ export function createPanelClient(transport: PanelTransport = fetch) {
     async request(method: 'GET' | 'POST' | 'PATCH', path: string, input?: unknown, signal?: AbortSignal, key?: string): Promise<unknown> {
       let route: ReturnType<typeof resolveRoute>, parsed: unknown
       try {
-        if (!/^\/api\/v1\/[a-z]+(?:\/[A-Za-z0-9._:-]+){0,2}$/.test(path)) throw Error()
-        route = resolveRoute(method, path)
+        const [pathname, queryString, extra] = path.split('?')
+        if (extra !== undefined || !/^\/api\/v1\/[a-z]+(?:\/[A-Za-z0-9._:-]+){0,2}$/.test(pathname)) throw Error()
+        route = resolveRoute(method, pathname)
+        const query: Record<string, string> = {}
+        for (const [name, value] of new URLSearchParams(queryString)) { if (Object.hasOwn(query, name)) throw Error(); query[name] = value }
+        route.query.parse(query)
         parsed = method === 'GET' ? undefined : route.input.parse(input)
       } catch { throw new PanelError('INVALID_REQUEST') }
       if (method !== 'GET' && !csrf) throw new PanelError('UNAUTHENTICATED', 401)
@@ -51,11 +55,11 @@ export const CatalogEntriesSchema = CatalogResponseSchema
 export const SnapshotSchema = z.strictObject({
   catalog: CatalogEntriesSchema, bindings: z.array(TrustedBindingSchema), projects: z.array(records.projects),
   demands: z.array(records.demands), plans: z.array(records.plans), sprints: z.array(records.sprints),
-  tasks: z.array(records.tasks), runs: z.array(records.runs), approvals: z.array(records.approvals),
+  tasks: z.array(records.tasks), runs: z.array(records.runs), approvals: z.array(records.approvals), evidence: z.array(records.evidence),
 })
 export type PanelSnapshot = z.infer<typeof SnapshotSchema>
 export async function loadSnapshot(client: PanelClient, signal?: AbortSignal): Promise<PanelSnapshot> {
-  const names = ['catalog', 'bindings', 'projects', 'demands', 'plans', 'sprints', 'tasks', 'runs', 'approvals'] as const
+  const names = ['catalog', 'bindings', 'projects', 'demands', 'plans', 'sprints', 'tasks', 'runs', 'approvals', 'evidence'] as const
   const values = await Promise.all(names.map(name => client.request('GET', `/api/v1/${name}`, undefined, signal)))
   return SnapshotSchema.parse(Object.fromEntries(names.map((name, index) => [name, values[index]])))
 }
@@ -67,6 +71,9 @@ export function errorMessage(error: unknown): string {
     INVALID_REQUEST: 'Revise os campos indicados antes de continuar.',
     INVALID_RESPONSE: 'O servidor retornou dados incompatíveis. Confira a versão do painel e reconecte.',
     OUTCOME_UNCERTAIN: 'O resultado da ação é incerto. Atualize os dados e reconcilie com a CLI antes de repetir a ação.',
+    STALE_APPROVAL: 'Esta solicitação já foi resolvida ou o turno mudou. Atualize os dados e revise a solicitação atual.',
+    UNSUPPORTED_DECISION: 'Esta opção não é oferecida pelo runtime nativo. Atualize a solicitação.',
+    RECONCILIATION_REQUIRED: 'A execução exige reconciliação na CLI. Nenhuma ação será repetida automaticamente.',
     CONFLICT: 'Os dados mudaram. Atualize os dados antes de enviar novamente; seu texto foi preservado.',
     DEMAND_FROZEN: 'Esta demanda já entrou em planejamento. Para mudar requisitos, crie outra demanda com um novo binding revisado na CLI.',
     RUNTIME_UNCONFIGURED: 'O runtime não está configurado. Revise a configuração confiável na CLI.',

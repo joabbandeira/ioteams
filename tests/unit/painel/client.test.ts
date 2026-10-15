@@ -18,6 +18,8 @@ it('rejects unsafe targets and refuses a mutation with uncertain network outcome
   const transport = vi.fn<PanelTransport>(async () => new Response(JSON.stringify({ csrfToken: 'csrf' })))
   const client = createPanelClient(transport); await client.session()
   await expect(client.request('GET', 'https://evil.test/api/v1/projects')).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+  await expect(client.request('GET', '/api/v1/runs/r1/timeline?after=1&after=2')).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+  await expect(client.request('GET', '/api/v1/runs/r1/timeline?after=-1')).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
   transport.mockRejectedValueOnce(Error('network'))
   await expect(client.request('POST', '/api/v1/demands', { id: 'd1', projectId: 'p1', goal: 'Goal' })).rejects.toMatchObject({ code: 'OUTCOME_UNCERTAIN' })
   expect(transport).toHaveBeenCalledTimes(2)

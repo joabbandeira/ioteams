@@ -35,11 +35,33 @@ it('persists project/demand/sprint commands and rejects stale versions and unkno
 it('reads catalog/search and refuses unconfigured execution authority or arbitrary control', async () => {
   const f = await setup()
   expect(await (await f.request('catalog')).json()).toEqual([])
+  expect((await f.request('evidence')).status).toBe(200)
+  expect((await f.request('evidence', 'POST', {}, 'fake-evidence')).status).toBe(404)
   expect(await (await f.request('knowledge/search', 'POST', { query: 'test' })).json()).toEqual({ status: 'no_evidence', reason: 'empty_index', citations: [] })
   expect((await f.request('runs', 'POST', { id: 'r1', planId: 'plan1' }, 'run')).status).toBe(404)
   expect((await f.request('shell', 'POST', { executable: 'sh' })).status).toBe(404)
   expect((await f.request('tasks/t1/transition', 'POST', { expectedVersion: 1, target: 'DONE' }, 'done')).status).toBe(400)
   expect((await f.request('knowledge/search', 'POST', { query: 'x', executable: 'sh' })).status).toBe(400)
+})
+it('projects only safe run timeline fields, paginates in sequence and never exposes raw host data', async () => {
+  const f = await setup()
+  f.store.create('project', { id: 'p1', name: 'Timeline', repositoryPath: f.root })
+  f.store.create('demand', { id: 'd1', projectId: 'p1', goal: 'Timeline' })
+  f.store.create('approvedPlan', { id: 'plan1', projectId: 'p1', demandId: 'd1', approvedAt: new Date().toISOString(), plan: {
+    version: 1, id: 'plan1', projectId: 'p1', teamId: 'lisa', goal: 'Timeline', branch: 'develop', remote: 'origin', baseSha: 'a'.repeat(40), policyHash: 'b'.repeat(64),
+    definitionOfDone: ['Verified'], limits: { maxAttempts: 3, turnTimeoutMs: 1_800_000 }, tasks: [{ id: 't1', title: 'Timeline', professionalId: 'bia-martins', dependsOn: [], allowedPaths: ['src'], acceptanceCriteria: ['Verified'], checks: [{ executable: 'node', args: ['check.mjs'], timeoutMs: 1000 }] }],
+  } })
+  f.store.create('run', { id: 'r1', projectId: 'p1', planId: 'plan1', status: 'running' })
+  for (let i = 0; i < 102; i++) f.store.appendEvent({ id: `e${i}`, projectId: 'p1', runId: 'r1', type: 'execution.turn', at: new Date().toISOString(), data: { phase: 'implement', taskId: 't1', attemptId: 'attempt1', threadId: 'th1', turnId: `tu${i}`, rawHostPayload: 'must stay private' } })
+  f.store.appendEvent({ id: 'private', projectId: 'p1', runId: 'r1', type: 'execution.started', at: new Date().toISOString(), data: { workspace: { root: '/private/workspace' } } })
+  const first = await f.request('runs/r1/timeline'); expect(first.status).toBe(200)
+  const body = await first.json() as { events: unknown[]; nextCursor: number }
+  expect(body.events).toHaveLength(100)
+  expect(JSON.stringify(body)).not.toMatch(/rawHostPayload|must stay private|private\/workspace/)
+  const next = await (await f.request(`runs/r1/timeline?after=${body.nextCursor}`)).json() as { events: unknown[] }
+  expect(next.events).toHaveLength(2)
+  expect((await f.request('runs/missing/timeline')).status).toBe(404)
+  expect((await f.request('runs/r1/timeline?after=-1')).status).toBe(400)
 })
 it('persists replay receipts across server and SQLite reopen; never repeats uncertain intents', async () => {
   const f = await setup()

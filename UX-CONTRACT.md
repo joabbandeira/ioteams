@@ -29,9 +29,19 @@ Table Selection e Date não se aplicam: não há seleção de tabela nem campo d
 
 Trabalho inspeciona pessoas, sprints e tarefas reais. Conhecimento oferece catálogo e citações verificáveis. Configuração mostra primeiro a projeção pura do binding e permite somente objetivo/requisitos coerentes com slots confiáveis. Projeto, repositório, equipe, branch, remote, checks e escopo exigem nova política revisada na CLI para mudança. GET de bindings nunca cria workspace.
 
-Salvar demanda mantém o formulário e anuncia confirmação do serviço. Os requisitos são uma seleção local até Propor plano; isso é indicado antes da seleção. Propor plano, Aprovar este hash e Iniciar execução são três ações distintas com confirmação. A aprovação envia o hash completo exibido; a execução nunca começa automaticamente. Lacunas não oferecem replanejamento no mesmo ID. Execuções e aprovações usam versão e confirmação da solicitação concreta.
+Salvar demanda mantém o formulário e anuncia confirmação do serviço. Os requisitos são uma seleção local até Propor plano; isso é indicado antes da seleção. Propor plano, Aprovar este hash e Iniciar execução são três ações distintas com confirmação. A aprovação envia o hash completo exibido; a execução nunca começa automaticamente. Ao abrir uma confirmação, o painel captura demanda, versão, objetivo, requisitos, binding, hash e plano pertinentes. Divergência posterior ou 409 invalida esse diálogo permanentemente. Salvar usa a baseline revisada pelo formulário; atualização via SSE não autoriza sobrescrever uma versão mais nova. Revisar versão atual mostra o objetivo remoto e mantém o rascunho, que precisa ser salvo explicitamente se divergir. Lacunas não oferecem replanejamento no mesmo ID. Execuções e aprovações usam versão e confirmação da solicitação concreta.
 
 Navigation guard preserva os campos nesta aba e avisa ao trocar vista; page unload usa exclusivamente beforeunload quando há alterações. Não há persistência de drafts nem credenciais em localStorage. Hash de rota é a única informação de navegação persistida. Consultas de conhecimento são transitórias e potencialmente sensíveis: não entram na URL/histórico. Catálogo e execuções usam Mostrar mais de 20 em 20.
+
+### Execução, aprovações e evidências
+
+Iniciar execução prepara somente as tarefas ausentes do plano aprovado pelo endpoint de domínio e solicita um run distinto. Um run já registrado substitui a ação de iniciar por orientação para Execuções. Falha parcial ou resultado incerto não autoriza repetir tarefas ou runs automaticamente.
+
+O quadro preserva as sete colunas, owners, contagens e estado real. Inspecionar abre histórico com foco explícito; tentativas rejeitadas e suas evidências históricas continuam visíveis, sem validar a tentativa atual. O recurso `GET /api/v1/evidence` é somente leitura; nenhum payload HTTP pode criar checks. A conclusão e o remote exato vêm do núcleo, nunca de checkbox ou simulação visual.
+
+`GET /api/v1/runs/:id/timeline` pagina 100 eventos por sequência e projeta apenas tipos/campos permitidos. Não expõe payload bruto do host, workspace, política executável ou conteúdo de ferramentas. Fontes do plano aprovado são identificadas como contexto de planejamento. Intenção de push não é confirmação remota. A timeline revalida quando chega um novo snapshot, inclusive quando a versão do run não mudou. Leituras incrementais usam o último cursor carregado, mesclam por sequência sem duplicatas e preservam páginas abertas; mudar de run limpa o histórico anterior.
+
+Aprovações mostram comando/detalhes, request, run, thread, turno e versão. Apenas opções v1 oferecidas pelo comando nativo aparecem. O diálogo fixa essa identidade e fica inválido quando a versão, solicitação, turno, estado ativo ou conexão mudar. Decisões encerradas aparecem em histórico e não têm ação. Um 409 invalida a confirmação aberta, atualiza dados e exige nova revisão. Resultado incerto bloqueia o fluxo mesmo após leituras novas; a CLI reconcilia os efeitos.
 
 ### Route document title policy
 
@@ -43,7 +53,7 @@ Hash desconhecido mostra Página não encontrada com retorno ao trabalho. API 40
 
 ## Estado remoto e recuperação
 
-Leituras usam AbortController e descarte de resposta anterior. SSE reabre a conexão com cursor nativo e dispara nova leitura dos registros; metadata não é conteúdo dos eventos Scrum. Depois de reconectar ou retornar à aba, revalidar dados. Até isso acontecer, conteúdo retido é potencialmente desatualizado e ações ficam bloqueadas quando há falha de leitura.
+Leituras usam AbortController e descarte de resposta anterior. SSE reabre a conexão com cursor nativo e dispara nova leitura dos registros; metadata não é conteúdo dos eventos Scrum. Depois de reconectar ou retornar à aba, revalidar dados. Reconectar recria o stream SSE e lê o snapshot; controles e confirmações em portal só voltam após conexão e leitura confirmadas. O sinal offline bloqueia ações imediatamente e preserva campos na memória. Até isso acontecer, conteúdo retido é potencialmente desatualizado e ações ficam bloqueadas quando há falha de leitura.
 
 Mutação pessimista, bloqueio síncrono contra duplo clique, chave idempotente por envio e nenhuma repetição automática. Timeout/JSON inválido após envio significa resultado incerto; bloquear novas ações desse fluxo e instruir reconciliação na CLI antes de repetir. 409 preserva texto e exige atualização. Não há fila offline. Sessão expirada preserva o formulário não sensível em memória; código de acesso é apagado após a tentativa.
 
